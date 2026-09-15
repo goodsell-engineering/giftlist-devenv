@@ -172,6 +172,10 @@ services:
       Jwt__Audience: ${JWT_AUDIENCE:-giftlist}
     volumes:
       - ../giftlist-identity:/src
+      # GL-29: the local feed, restored at container runtime rather than at image build time —
+      # see the header of this file and ARCHITECTURE.md "Making the local feed visible to
+      # containers". This repo's nuget.config (GL-26) names /feed.
+      - ../local-feed:/feed:ro
       # GL-59: this service's build output, kept out of the bind mount — see x-dotnet-env above.
       - identity-buildoutput:/build-output
     depends_on:
@@ -192,6 +196,8 @@ services:
       ConnectionStrings__Mongo: mongodb://mongodb:27017
     volumes:
       - ../giftlist-giftlists:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/feed:ro
       # GL-59: see identity's volumes above.
       - giftlists-buildoutput:/build-output
     depends_on:
@@ -212,6 +218,8 @@ services:
       ConnectionStrings__Mongo: mongodb://mongodb:27017
     volumes:
       - ../giftlist-reservations:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/feed:ro
       # GL-59: see identity's volumes above.
       - reservations-buildoutput:/build-output
     depends_on:
@@ -248,6 +256,8 @@ services:
       - "${GATEWAY_PORT:-8080}:8080"
     volumes:
       - ../giftlist-gateway:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/feed:ro
       # GL-59: see identity's volumes above.
       - gateway-buildoutput:/build-output
     depends_on:
@@ -273,8 +283,12 @@ services:
       # The gateway/protos mount that used to be here is gone: this repo no longer runs a
       # protobuf generator. giftlist-gateway owns the protos and publishes the generated client
       # as an npm tarball (ARCHITECTURE.md "Repository layout"), which giftlist-web installs from
-      # ../local-feed. The mount that replaces it is GL-29's, and it must be /local-feed rather
-      # than /feed — see the header of this file for why the two are not interchangeable.
+      # ../local-feed. GL-29: mounted at /local-feed, NOT /feed — package.json's
+      # `file:../local-feed/giftlist-gateway-client-0.1.0.tgz` specifier has to resolve
+      # identically on the host and in the container, and /app is the repo here, so `..` is `/`.
+      # See the header of this file and giftlist-web/Dockerfile for why the two mounts are not
+      # interchangeable.
+      - ../local-feed:/local-feed:ro
     depends_on:
       gateway:
         condition: service_healthy
