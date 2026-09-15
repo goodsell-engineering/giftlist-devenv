@@ -1,0 +1,307 @@
+name: giftlist
+
+# Post-GL-25 seven-repo layout: this file lives in giftlist-devenv, and every build context and
+# bind mount points at a SIBLING CLONE (`../giftlist-identity`, ...). clone-all.sh creates that
+# layout; ARCHITECTURE.md "Packaging: local feed" sketches it.
+#
+# Each .NET host's dev image runs `dotnet watch` (GL-13) over its own repo, bind-mounted to /src.
+# Before the split all four mounted the whole monorepo because they shared buildingblocks/ by
+# ProjectReference; they now consume it as a NuGet package, so each container sees one repo.
+#
+# THIS STACK DOES NOT COME UP YET, and the reason is a deliberate scope boundary rather than a
+# bug. Every .NET service now restores BuildingBlocks(.Infrastructure) and, where it applies,
+# another service's *.Contracts from the local folder feed, and giftlist-web installs the
+# Gateway's client tarball from it. Two things are still missing, in this order:
+#
+#   GL-26  a nuget.config per .NET repo pointing at the feed alongside nuget.org, and
+#          `../local-feed` itself
+#   GL-28  `make pack-all`, which fills that feed in dependency order and refuses to overwrite a
+#          version already in it
+#   GL-29  the mounts below that make the feed visible inside these containers
+#
+# What GL-29 has to get right, recorded here because it is not obvious and is easy to get subtly
+# wrong (ARCHITECTURE.md "Making the local feed visible to containers"):
+#
+#   - .NET services: `- ../local-feed:/feed:ro`, with each repo's nuget.config naming /feed. The
+#     path inside the container is free to differ from the host's, because a nuget.config is
+#     configuration.
+#   - web: `- ../local-feed:/local-feed:ro` and NOT /feed. giftlist-web depends on the client as
+#     `file:../local-feed/giftlist-gateway-client-0.1.0.tgz`, a specifier baked into package.json
+#     that has to resolve identically on the host and in the container. /app is the repo, so `..`
+#     is `/`, so the mount point is forced to /local-feed. See giftlist-web/Dockerfile.
+
+x-dotnet-env: &dotnet-env
+  DOTNET_ENVIRONMENT: Development
+  Rebus__ConnectionString: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672
+  # Ops HTTP (/healthz), added by GL-52. Same port on all four .NET hosts; only Gateway
+  # additionally publishes it externally via `ports:` below.
+  #
+  # The Mongo URI carries no database path segment on purpose: each host passes its own
+  # database name to AddBuildingBlocksMongo, which calls GetDatabase(name). A path segment
+  # here would be silently ignored, giving two sources of truth that can drift apart
+  # without anything failing.
+  ASPNETCORE_URLS: http://+:8080
+  # GL-59: this began as a fix for four containers bind-mounting the SAME monorepo root and
+  # racing on one bin/obj for the shared buildingblocks/ projects. GL-25 removed that race at the
+  # root — each container now mounts only its own repo and no two share a path — so the original
+  # justification is gone. It is kept anyway, for a smaller reason that survives the split: a
+  # container and a host `dotnet build` of the same repo would otherwise write to the same bin/obj
+  # through the bind mount. Keeping build output out of the mount entirely costs one named volume
+  # per service and removes the question. Do not read the GL-59 comments below as still
+  # describing a cross-service hazard; they do not.
+  #
+  # ArtifactsPath/UseArtifactsOutput are ordinary MSBuild properties, and MSBuild seeds property
+  # values from the process environment before any .props file (including Directory.Build.props)
+  # is evaluated — earlier than the SDK's own check for "was this set too late to matter"
+  # (Microsoft.NET.Sdk/Sdk/UseArtifactsOutputPath.props' _ArtifactsPathSetEarly). So this env var
+  # is picked up validly with zero Dockerfile or Directory.Build.props changes, and — because it
+  # is only set inside these containers — a host `dotnet build`/`dotnet test` is completely
+  # unaffected and keeps using the traditional per-project bin/obj it always has.
+  #
+  # BUT an environment-derived property is an ORDINARY property, not a global one, so setting
+  # ArtifactsPath in Directory.Build.props would WIN and silently defeat all of this — putting
+  # all four containers back on one path inside the bind mount while these comments still claim
+  # isolation. Nothing sets it today. The warning deliberately lives HERE and in devenv/README.md
+  # rather than in Directory.Build.props itself: since GL-25 that file is copied into all five
+  # .NET repo roots by giftlist-devenv/scripts/sync-repo-roots.sh and pinned byte-for-byte by
+  # both TargetFrameworkTests and RepoRootFileSyncTests, so a comment there is per-repo drift the
+  # next run of that script would revert. If you need artifacts output on the host too, pass it
+  # as a global property (-p:ArtifactsPath=...), which outranks Directory.Build.props.
+  #
+  # /build-output is intentionally NOT under /src: each service's compose block below mounts its
+  # own named volume there, so even though every container sees the identical path string, it is
+  # a distinct filesystem outside the shared bind mount. That is what actually breaks the race —
+  # not the artifacts layout by itself. Do NOT instead set a single BaseIntermediateOutputPath:
+  # that collapses every *project* (BuildingBlocks, Identity.Host, GiftLists.Infrastructure, ...)
+  # into one obj directory too, a different corruption. UseArtifactsOutput gives each project its
+  # own subfolder under ArtifactsPath automatically (bin/<Project>/, obj/<Project>/), which is
+  # what makes it safe to point every container at the same-looking path.
+  #
+  # Verified deterministically on the host (not just inferred): two concurrent `dotnet build`s of
+  # BuildingBlocks.Infrastructure.csproj with no ArtifactsPath reproduce this exact
+  # GenerateDepsFile/BuildingBlocks.deps.json IOException every time; the same two builds with
+  # per-process ArtifactsPath values both succeed, and the shared project tree does not gain a
+  # single bin/ or obj/ from either run.
+  ArtifactsPath: /build-output
+  UseArtifactsOutput: "true"
+
+# Shared healthcheck shape for the four .NET hosts: readiness (not liveness) is what gates
+# `depends_on: condition: service_healthy`, because liveness deliberately says nothing about
+# Mongo/RabbitMQ (a broker blip must not read as "kill the container" — ARCHITECTURE.md "Why workers still need a little HTTP").
+# start_period is generous because these are `dotnet watch` dev images: the first build inside
+# the bind-mounted source (on top of the image's pre-warmed NuGet cache) still takes real time —
+# measured at 2m46s-2m51s across the four services building concurrently on this host, so
+# 240s is that worst case plus roughly 90s of headroom. NOTE that measurement predates GL-59:
+# it was taken when all four services shared one bin/obj in the bind mount. Each now builds the
+# whole graph into its own volume with no sharing, so the basis has changed — two post-GL-59
+# cold cycles still came up healthy inside 240s, but re-measure before tightening this value. Note the cost is asymmetric: during
+# start_period a failing probe does not decrement `retries`, so a genuinely broken container
+# takes 240s + 10x5s to report unhealthy, and `web` blocks for that whole window.
+x-dotnet-healthcheck: &dotnet-healthcheck
+  test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz/ready"]
+  interval: 5s
+  timeout: 5s
+  retries: 10
+  start_period: 240s
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: giftlist-rabbitmq
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    # The image sets no USER, so the container (and therefore this healthcheck) runs as
+    # root; only the *server* process is dropped to uid 999 (rabbitmq), via gosu, by the
+    # entrypoint. `rabbitmq-diagnostics` talks over Erlang distribution, which requires
+    # /var/lib/rabbitmq/.erlang.cookie and *creates it if missing*, owned by whoever ran
+    # the command. On a fresh volume the healthcheck can fire before the server has
+    # written its own cookie, leaving it root:root 0400 — the server then can never read
+    # it and RabbitMQ fails to boot with `eacces`. start_period does NOT protect against
+    # this: it only stops early failures counting toward `retries`, the check still runs
+    # on every `interval` from container start. Fix is to run the probe as the rabbitmq
+    # user so any cookie it creates is one the server can also read. Do not "simplify"
+    # this back to a bare CMD — that reintroduces the race.
+    healthcheck:
+      test: ["CMD-SHELL", "gosu rabbitmq rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mongodb:
+    image: mongo:7
+    container_name: giftlist-mongodb
+    # Standalone mongod — no replica set. Change streams were removed from the design,
+    # so nothing needs one (docs/ARCHITECTURE.md "Tech stack").
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      # mongosh is a Node process: cold-starting it on a host loaded by four concurrent
+      # dotnet watch builds can burn most of a 5s budget before mongod is asked anything,
+      # producing a false unhealthy that cascades to every depends_on service.
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  identity:
+    build:
+      context: ../giftlist-identity
+      dockerfile: src/Identity.Host/Dockerfile
+    container_name: giftlist-identity
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Mongo: mongodb://mongodb:27017
+      # GL-16/Batch 5 review: Identity refuses to start without these three (fail-fast, not a
+      # silent default) — ARCHITECTURE.md "Why workers still need a little HTTP". JWT_SIGNING_KEY_PEM below is a **committed
+      # dev-only key pair, never used anywhere but this local stack** — see .env.example for the
+      # loud version of this warning and how to regenerate it. The '\n' sequences are literal
+      # backslash-n, not real newlines: JwtTokenIssuer un-escapes them before parsing the PEM,
+      # which is what lets a multi-line private key travel as one KEY=VALUE line.
+      Jwt__SigningKeyPem: ${JWT_SIGNING_KEY_PEM:------BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC18tWGbdPAf1Ol\nGjCybEAflbRDo8QZTsjY8ZCx0zG8mRTNF9B3IuVPa7fbmbB7Ixy8AaL2TZuUo5jF\n9XRI6URmn+0GuPTMG9IcpbKq7BcK1xfOF1C5fREwk2KeIyTHzA+Ec52uqcGNTOhb\nhfV3FLHc0Mku/i0OdIPvN/E8GIOBts5/NVv89I+9Gl5nwiAq2sugzdieviWhdRmd\nRyW6HzkZr5Q2nP+sFf2GCzpIt5w0il9gbaAk/vs5pib4f+7CYcNc8TwsCbKzMBC/\nU7PX63XJf6ustJcCh9Vdu/4lFCLM8bCH3w93luGrNOrCzr/YomMrW8+EZ2xJa6tL\no+4/S9YrAgMBAAECggEAL8S/VnnDHEjRdwk3O8C73Q76sr9uHo7WoE5bhLRD3JX8\nJhRYgM7CkWVgceEZulpvktSDKlMZw55n36EflHzZnm/iVN9+NZAgS7EdBU7SheAO\nuebZJLm3J5+qRoZHg8UJVebcwRyEWkqUvmKfHVJrl+OgzhuhTKg+czGmvfZZoFYi\n6kOSusXFydW4CEgQfcJFD+EXvRTgaqwNpbhazQ/wDIuB7FhptBd026KEGCPQ3PUX\nASFWcp0NKqGLObroG8qVADrSCnAVYwdr2MdVV3GK+uQ0fzCK+lhG5ir8lRDjwpix\n/Qkyr9DzefSdAeSshQMxcbhoP3uAjKGUTqfTb8tKEQKBgQDcu7VZAbFvGhpR92IJ\nFP/gR4LwzQyzQ2gS4/e/6aVKXuoFLDYC66vsDG+LH07KFPO6uifOpuwg2Vu1c2Na\nR86guOzRvXb7HKFholKvRthssGbzTeZwO3pu25xgxVCT8NYRPZOcg04cWHdP+aLT\n1qBz/AaHLEZu1CHm/0egSSnXHwKBgQDTBMefQqv0CWbNPCZ4EPazQShGJXrZmfHi\nEQiv6wnSNxLUtEAnU5NTwe1XdTtWSvH32NMrr9W8PKk4yLe8V8dJo98B0S+okvHZ\n7kSQiEhp1O9tLukjfbZXrsLC9NrJOJYIuTYeCtDUonVesuNl1oHLKk5wXoAnFhfo\n5V6QkDvbdQKBgGYDGjyYW7hNB/z5p4Uq/1ZXtlwzZ7sxW9ffI5C+GnXUh7L8S7nt\n0Pa2iJZzUaZzKHETt3H6EwbbbVbejPwcU5JT5J7KQUKsaKkGq8/1nfAdVnb7eZRE\n6MBzHkJa7nJwy34MRzv+MwtGl12OsYHVnzH7N8kg3Sw7Pa/UKvYY2g1hAoGBAM2Y\nsZo1Dm6FnnjGa0C+Xm8GQ+QcblaHDEnTiOBFo1sCt8EwIfVvE3Me1k1I9lg8SwbN\nZeoBtsBhZgriXUoPSCcyl3wgwUuAaE2KPZmIfu1GP0Tk2NfwivFhX3cts+Er1dqI\nAfdBWHhkFPEAYFh/qBQ3kxceq8PpXcBXgkxdi0RlAoGBANT1zOrNh2VgLNHWqD8f\nBlfZMX5EZxy3KtaIyGPXpMvwp4T9D/nYHIbnLmQWwgj8YpgTc3lwuGmiNaMJJBfA\nx0s2NUklkft/1KBochAdnMlyWxIpb4epQYSAbm0ytrxPxHgu6bQ+vuN9uhk8HEui\nD577JkCbY7upRZ8KGN7NWTVo\n-----END PRIVATE KEY-----}
+      Jwt__Issuer: ${JWT_ISSUER:-giftlist-identity}
+      Jwt__Audience: ${JWT_AUDIENCE:-giftlist}
+    volumes:
+      - ../giftlist-identity:/src
+      # GL-59: this service's build output, kept out of the bind mount — see x-dotnet-env above.
+      - identity-buildoutput:/build-output
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      <<: *dotnet-healthcheck
+
+  giftlists:
+    build:
+      context: ../giftlist-giftlists
+      dockerfile: src/GiftLists.Host/Dockerfile
+    container_name: giftlist-giftlists
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Mongo: mongodb://mongodb:27017
+    volumes:
+      - ../giftlist-giftlists:/src
+      # GL-59: see identity's volumes above.
+      - giftlists-buildoutput:/build-output
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      <<: *dotnet-healthcheck
+
+  reservations:
+    build:
+      context: ../giftlist-reservations
+      dockerfile: src/Reservations.Host/Dockerfile
+    container_name: giftlist-reservations
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Mongo: mongodb://mongodb:27017
+    volumes:
+      - ../giftlist-reservations:/src
+      # GL-59: see identity's volumes above.
+      - reservations-buildoutput:/build-output
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      <<: *dotnet-healthcheck
+
+  gateway:
+    build:
+      context: ../giftlist-gateway
+      dockerfile: src/Gateway.Host/Dockerfile
+    container_name: giftlist-gateway
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__Mongo: mongodb://mongodb:27017
+      # GL-18 review: appsettings.Development.json hard-codes http://localhost:5173 as a sane
+      # default for running Gateway.Host outside compose, but VITE_PORT below is what actually
+      # decides where `web` gets published — an env var wins over appsettings.*.json in the
+      # default configuration order, so this keeps CORS matching reality whenever VITE_PORT is
+      # overridden instead of breaking silently.
+      Cors__AllowedOrigins__0: http://localhost:${VITE_PORT:-5173}
+      # GL-23: validates the JWT the SPA sends with myGiftLists/giftList(id) — the public half of
+      # Identity's own Jwt__SigningKeyPem above (ARCHITECTURE.md "Why workers still need a little HTTP"). Gateway refuses to start
+      # without these three, same fail-fast as Identity's own signing key. JWT_PUBLIC_KEY_PEM's
+      # default below is the public key that matches the committed dev private key exactly (see
+      # .env.example) — never used anywhere but this local stack.
+      Jwt__PublicKeyPem: ${JWT_PUBLIC_KEY_PEM:------BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtfLVhm3TwH9TpRowsmxA\nH5W0Q6PEGU7I2PGQsdMxvJkUzRfQdyLlT2u325mweyMcvAGi9k2blKOYxfV0SOlE\nZp/tBrj0zBvSHKWyquwXCtcXzhdQuX0RMJNiniMkx8wPhHOdrqnBjUzoW4X1dxSx\n3NDJLv4tDnSD7zfxPBiDgbbOfzVb/PSPvRpeZ8IgKtrLoM3Ynr4loXUZnUcluh85\nGa+UNpz/rBX9hgs6SLecNIpfYG2gJP77OaYm+H/uwmHDXPE8LAmyszAQv1Oz1+t1\nyX+rrLSXAofVXbv+JRQizPGwh98Pd5bhqzTqws6/2KJjK1vPhGdsSWurS6PuP0vW\nKwIDAQAB\n-----END PUBLIC KEY-----}
+      Jwt__Issuer: ${JWT_ISSUER:-giftlist-identity}
+      Jwt__Audience: ${JWT_AUDIENCE:-giftlist}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - ../giftlist-gateway:/src
+      # GL-59: see identity's volumes above.
+      - gateway-buildoutput:/build-output
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      <<: *dotnet-healthcheck
+
+  web:
+    build:
+      context: ../giftlist-web
+      dockerfile: Dockerfile
+    container_name: giftlist-web
+    environment:
+      VITE_GATEWAY_URL: http://localhost:${GATEWAY_PORT:-8080}
+    ports:
+      - "${VITE_PORT:-5173}:5173"
+    volumes:
+      - ../giftlist-web:/app
+      - web-node-modules:/app/node_modules
+      # The gateway/protos mount that used to be here is gone: this repo no longer runs a
+      # protobuf generator. giftlist-gateway owns the protos and publishes the generated client
+      # as an npm tarball (ARCHITECTURE.md "Repository layout"), which giftlist-web installs from
+      # ../local-feed. The mount that replaces it is GL-29's, and it must be /local-feed rather
+      # than /feed — see the header of this file for why the two are not interchangeable.
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+# rabbitmq-data deliberately maps the whole of /var/lib/rabbitmq, not just mnesia/ (the
+# actual queue/message data), even though that also persists .erlang.cookie across
+# `make down` + `make up`. Considered narrowing it to just .../mnesia so a poisoned
+# cookie couldn't outlive a container recreate without a full `make reset`, but the
+# image's own entrypoint (`/usr/local/bin/docker-entrypoint.sh`) already runs
+# `find /var/lib/rabbitmq \! -user rabbitmq -exec chown rabbitmq '{}' +` as root before
+# every rabbitmq-server start, container-recreate or plain `docker start` alike — so any
+# bad ownership under this whole path, cookie included, self-heals on the very next
+# start regardless of the volume boundary. Narrowing would only affect whether Erlang
+# distribution state (irrelevant here: single-node, no clustering) survives a `down`
+# without `--volumes`. Since the real fix is the rabbitmq healthcheck running as the
+# rabbitmq user (see above) rather than relying on this chown to paper over a recurring
+# race, splitting the volume adds no protection against this bug and is left alone.
+volumes:
+  rabbitmq-data:
+  mongodb-data:
+  web-node-modules:
+  # GL-59: per-container build output for the four .NET dev services (x-dotnet-env's
+  # ArtifactsPath), kept out of each service's own bind mount so a container build and a host
+  # build of the same repo never write to the same bin/obj. `make reset` drops these
+  # along with the others above, which is correct — a stale artifacts cache is only a rebuild,
+  # never a correctness issue the way a stale Mongo/Rabbit volume would be.
+  identity-buildoutput:
+  giftlists-buildoutput:
+  reservations-buildoutput:
+  gateway-buildoutput:

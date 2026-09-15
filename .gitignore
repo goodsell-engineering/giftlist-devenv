@@ -1,0 +1,2 @@
+# One .env at the compose root feeds all services; .env.example is committed, .env is not.
+.env
