@@ -38,16 +38,18 @@ tarball. Nothing can restore until the feed exists and the containers can see it
 
 | Missing | Issue |
 |---|---|
-| `../local-feed` and a `nuget.config` per .NET repo pointing at it alongside nuget.org | GL-26 |
 | Semantic versioning discipline and consumer pinning | GL-27 |
 | `make pack-all` (dependency-ordered, refuses to overwrite a version already in the feed) and `clone-all.sh` | GL-28 |
-| The feed mounts in `docker-compose.yml` | GL-29 |
 | Per-repo CI | GL-30 |
 
-`docker-compose.yml`'s header records the one detail GL-29 is most likely to get wrong: the .NET
-services want `../local-feed:/feed:ro`, but `web` wants `../local-feed:/local-feed:ro` and not
-`/feed`, because a `file:` dependency specifier is baked into `package.json` and has to resolve
-the same way on the host and in the container.
+GL-26 (each .NET repo's `nuget.config`) and GL-29 (the feed mounts in `docker-compose.yml`) have
+landed, together and at the same mount point: every service, .NET or `web`, mounts the feed at
+`- ../local-feed:/local-feed:ro`. An earlier cut gave the .NET services `/feed` instead, on the
+theory that the in-container path could differ from the host's because a `nuget.config` is
+configuration — true, but beside the point once a relative local source is understood to resolve
+against the *declaring* `nuget.config`'s own directory rather than the CWD: `../local-feed` from
+each repo's root already means the same thing everywhere. `docker-compose.yml`'s header has the
+full account of why the split was undone.
 
 ## Keeping shared files identical across repos
 
@@ -57,7 +59,7 @@ copy fails the build instead of rotting quietly.
 
 | Script | Canonical copy | Propagates | Checked by |
 |---|---|---|---|
-| `scripts/sync-repo-roots.sh` | `giftlist-buildingblocks/Directory.Build.props` | the other four .NET repo roots | `RepoRootFileSyncTests` |
+| `scripts/sync-repo-roots.sh` | `giftlist-buildingblocks/{Directory.Build.props,nuget.config}` | the other four .NET repo roots | `RepoRootFileSyncTests` |
 | `scripts/sync-arch-tests.sh` | `giftlist-giftlists/tests/GiftLists.UnitTests/Architecture` | the other four `*.UnitTests/Architecture` folders | `ArchitectureTestSyncTests` |
 
 Five repos, not seven: `giftlist-web` and this one contain no MSBuild project, so a
