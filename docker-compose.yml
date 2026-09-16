@@ -11,24 +11,28 @@ name: giftlist
 # THIS STACK DOES NOT COME UP YET, and the reason is a deliberate scope boundary rather than a
 # bug. Every .NET service now restores BuildingBlocks(.Infrastructure) and, where it applies,
 # another service's *.Contracts from the local folder feed, and giftlist-web installs the
-# Gateway's client tarball from it. Two things are still missing, in this order:
+# Gateway's client tarball from it. What's still missing:
 #
-#   GL-26  a nuget.config per .NET repo pointing at the feed alongside nuget.org, and
-#          `../local-feed` itself
 #   GL-28  `make pack-all`, which fills that feed in dependency order and refuses to overwrite a
 #          version already in it
-#   GL-29  the mounts below that make the feed visible inside these containers
 #
-# What GL-29 has to get right, recorded here because it is not obvious and is easy to get subtly
-# wrong (ARCHITECTURE.md "Making the local feed visible to containers"):
+# GL-26 (each .NET repo's nuget.config) and GL-29 (the mounts below) landed together, on purpose:
+# a first cut of GL-29 mounted the feed at /feed for .NET services and /local-feed for web, on the
+# theory that "the path inside the container is free to differ from the host's, because a
+# nuget.config is configuration" — true of nuget.config, but beside the point once GL-26's own
+# NU1301 finding is taken seriously: a relative local source resolves against the *declaring*
+# nuget.config's own directory, not the CWD, so `/src/nuget.config` + `../local-feed` already
+# means `/local-feed` for every service, .NET or not. Splitting the mount point in two bought
+# nothing and cost a container-only symlink (`RUN ln -s /feed /local-feed` in each Host
+# Dockerfile) to paper over the gap — a symlink Docker will happily resolve a *mount target*
+# through as well as a file read, so a half-finished cut-over between the two mount points would
+# have been silent. All five services now mount the feed at the same path:
 #
-#   - .NET services: `- ../local-feed:/feed:ro`, with each repo's nuget.config naming /feed. The
-#     path inside the container is free to differ from the host's, because a nuget.config is
-#     configuration.
-#   - web: `- ../local-feed:/local-feed:ro` and NOT /feed. giftlist-web depends on the client as
-#     `file:../local-feed/giftlist-gateway-client-0.1.0.tgz`, a specifier baked into package.json
-#     that has to resolve identically on the host and in the container. /app is the repo, so `..`
-#     is `/`, so the mount point is forced to /local-feed. See giftlist-web/Dockerfile.
+#   - ../local-feed:/local-feed:ro
+#
+# and every nuget.config names `../local-feed`, resolved from the repo root at /src, exactly as
+# it already is on the host. See ARCHITECTURE.md "Making the local feed visible to containers"
+# and each repo's own nuget.config comment for the full reasoning.
 
 x-dotnet-env: &dotnet-env
   DOTNET_ENVIRONMENT: Development
@@ -172,6 +176,11 @@ services:
       Jwt__Audience: ${JWT_AUDIENCE:-giftlist}
     volumes:
       - ../giftlist-identity:/src
+      # GL-29: the local feed, restored at container runtime rather than at image build time —
+      # see the header of this file and ARCHITECTURE.md "Making the local feed visible to
+      # containers". This repo's nuget.config (GL-26) names ../local-feed, which resolves to this
+      # exact mount point from /src.
+      - ../local-feed:/local-feed:ro
       # GL-59: this service's build output, kept out of the bind mount — see x-dotnet-env above.
       - identity-buildoutput:/build-output
     depends_on:
@@ -192,6 +201,8 @@ services:
       ConnectionStrings__Mongo: mongodb://mongodb:27017
     volumes:
       - ../giftlist-giftlists:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/local-feed:ro
       # GL-59: see identity's volumes above.
       - giftlists-buildoutput:/build-output
     depends_on:
@@ -212,6 +223,8 @@ services:
       ConnectionStrings__Mongo: mongodb://mongodb:27017
     volumes:
       - ../giftlist-reservations:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/local-feed:ro
       # GL-59: see identity's volumes above.
       - reservations-buildoutput:/build-output
     depends_on:
@@ -248,6 +261,8 @@ services:
       - "${GATEWAY_PORT:-8080}:8080"
     volumes:
       - ../giftlist-gateway:/src
+      # GL-29: see identity's volumes above.
+      - ../local-feed:/local-feed:ro
       # GL-59: see identity's volumes above.
       - gateway-buildoutput:/build-output
     depends_on:
@@ -273,8 +288,11 @@ services:
       # The gateway/protos mount that used to be here is gone: this repo no longer runs a
       # protobuf generator. giftlist-gateway owns the protos and publishes the generated client
       # as an npm tarball (ARCHITECTURE.md "Repository layout"), which giftlist-web installs from
-      # ../local-feed. The mount that replaces it is GL-29's, and it must be /local-feed rather
-      # than /feed — see the header of this file for why the two are not interchangeable.
+      # ../local-feed. package.json's `file:../local-feed/giftlist-gateway-client-0.1.0.tgz`
+      # specifier has to resolve identically on the host and in the container, and /app is the
+      # repo here, so `..` is `/` — the same mount point every .NET service uses too. See the
+      # header of this file for why one path now serves every service.
+      - ../local-feed:/local-feed:ro
     depends_on:
       gateway:
         condition: service_healthy

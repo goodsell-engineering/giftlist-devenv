@@ -52,6 +52,11 @@ readonly target_repos=(
 
 readonly synced_files=(
   "Directory.Build.props"
+  # GL-26: five byte-identical nuget.config files, each binding the GiftList package ids to the
+  # local feed exclusively via packageSourceMapping. Unsynced, a silently drifted copy in one
+  # repo (a dropped mapping entry, say) resolves those ids from nuget.org instead and nothing
+  # fails loudly -- exactly the dependency-confusion gap GL-26 exists to close.
+  "nuget.config"
 )
 
 readonly manifest_name="repo-root-files.sha256"
