@@ -57,6 +57,11 @@ readonly synced_files=(
   # repo (a dropped mapping entry, say) resolves those ids from nuget.org instead and nothing
   # fails loudly -- exactly the dependency-confusion gap GL-26 exists to close.
   "nuget.config"
+  # GL-27: carries the build-time target that rejects a non-exact local PackageReference pin
+  # (a bare Version="0.1.0" floor instead of Version="[0.1.0]"). An unsynced copy is the same
+  # hazard as the two above: one repo silently loses the enforcement and its PackageReferences
+  # can float onto whatever nuget.org or the local feed happens to resolve next, with no error.
+  "Directory.Build.targets"
 )
 
 readonly manifest_name="repo-root-files.sha256"

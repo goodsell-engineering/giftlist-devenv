@@ -21,11 +21,17 @@ ROOT_DIR := $(dir $(THIS_MAKEFILE))
 
 COMPOSE := docker compose -f "$(ROOT_DIR)docker-compose.yml" --project-directory "$(ROOT_DIR)"
 
-.PHONY: help up down reset restart build logs ps reset-testcontainers
+.PHONY: help up down reset restart build logs ps reset-testcontainers pack-all clone-all
 
 help:
 	@echo "GiftList devenv"
 	@echo ""
+	@echo "  make clone-all            clone the other six repos as siblings, plus an empty"
+	@echo "                            local-feed/ — see scripts/clone-all.sh"
+	@echo "  make pack-all             pack the BuildingBlocks family, the *.Contracts packages"
+	@echo "                            and the Gateway's npm client into local-feed/, in"
+	@echo "                            dependency order — refuses to overwrite a version already"
+	@echo "                            there (see scripts/pack-all.sh)"
 	@echo "  make up                   build (if needed) and start the whole stack, detached"
 	@echo "  make down                 stop and remove containers; named volumes are kept"
 	@echo "  make reset                down, then drop the named volumes (rabbitmq-data,"
@@ -39,7 +45,17 @@ help:
 	@echo "                            by 'dotnet test' — see README.md \"Integration tests and"
 	@echo "                            container reuse\""
 	@echo ""
-	@echo "First time: cp .env.example .env (optional — see .env.example for why)"
+	@echo "First time: make clone-all, then make pack-all, then cp .env.example .env (optional"
+	@echo "            — see .env.example for why), then make up"
+
+clone-all:
+	"$(ROOT_DIR)scripts/clone-all.sh"
+
+# Dependency-ordered; refuses to overwrite a version already in local-feed. See
+# scripts/pack-all.sh's header for why that guard has no bypass, and README.md "The sibling-clone
+# layout" for the layout it assumes.
+pack-all:
+	"$(ROOT_DIR)scripts/pack-all.sh"
 
 up:
 	$(COMPOSE) up --build -d

@@ -6,9 +6,18 @@ required to run the system (see `../giftlist-web/README.md` and each service's `
 what *is* useful to install for editor tooling).
 
 ```
+make clone-all           # clone the other six repos as siblings, plus an empty local-feed/
+make pack-all            # pack the BuildingBlocks family, the *.Contracts packages and the
+                         # Gateway's npm client into local-feed/ (dependency-ordered; refuses
+                         # to overwrite a version already there)
 cp .env.example .env    # optional — see .env.example for why
 make up                 # build (if needed) and start the whole stack, detached
 ```
+
+Run `make clone-all` and `make pack-all` from a fresh clone of *this* repo only — both assume
+they are the thing that already exists and create everything else around them. Once
+`local-feed/` is populated, each individual repo's own `dotnet restore` / `npm install` (see its
+README) works from a cold cache, because that is what `make pack-all` exists to make true.
 
 ## The sibling-clone layout
 
@@ -27,29 +36,30 @@ giftlist/
   giftlist-web/
 ```
 
-`clone-all.sh`, which creates that layout in one command, is GL-28 and does not exist yet; clone
-the seven by hand until it does.
+`make clone-all` (`scripts/clone-all.sh`) creates that layout in one command (the other six
+repos, HTTPS, plus an empty `local-feed/`); it skips anything already present rather than
+re-cloning or updating it, so an interrupted first run is safe to just re-run.
 
-## `make up` does not work yet — what is still missing
+## First run, in order: clone, pack, up
 
 The split (GL-25) converted every cross-repo `ProjectReference` into a `PackageReference` and
 moved the SPA's protobuf generator into `giftlist-gateway`, which publishes the client as an npm
-tarball. Nothing can restore until the feed exists and the containers can see it:
+tarball. Nothing can restore until the feed exists and the containers can see it, which is why the
+Quickstart above runs `make clone-all` then `make pack-all` before `make up`, not after.
+`scripts/pack-all.sh` packs in dependency order (BuildingBlocks family, then the three
+`*.Contracts` packages, then the npm client) and refuses to overwrite a version already sitting in
+`local-feed/` — see that script's header for why there is no flag to bypass that.
 
-| Missing | Issue |
-|---|---|
-| Semantic versioning discipline and consumer pinning | GL-27 |
-| `make pack-all` (dependency-ordered, refuses to overwrite a version already in the feed) and `clone-all.sh` | GL-28 |
-| Per-repo CI | GL-30 |
-
-GL-26 (each .NET repo's `nuget.config`) and GL-29 (the feed mounts in `docker-compose.yml`) have
-landed, together and at the same mount point: every service, .NET or `web`, mounts the feed at
+GL-26 (each .NET repo's `nuget.config`) and GL-29 (the feed mounts in `docker-compose.yml`) landed
+earlier, together and at the same mount point: every service, .NET or `web`, mounts the feed at
 `- ../local-feed:/local-feed:ro`. An earlier cut gave the .NET services `/feed` instead, on the
 theory that the in-container path could differ from the host's because a `nuget.config` is
 configuration — true, but beside the point once a relative local source is understood to resolve
 against the *declaring* `nuget.config`'s own directory rather than the CWD: `../local-feed` from
 each repo's root already means the same thing everywhere. `docker-compose.yml`'s header has the
-full account of why the split was undone.
+full account of why the split was undone. GL-27 (consumer version pinning, enforced at build time
+by each .NET repo's `Directory.Build.targets`) and GL-30 (per-repo CI) land in this same batch, so
+the split's packaging story is complete as of here.
 
 ## Keeping shared files identical across repos
 
@@ -59,7 +69,7 @@ copy fails the build instead of rotting quietly.
 
 | Script | Canonical copy | Propagates | Checked by |
 |---|---|---|---|
-| `scripts/sync-repo-roots.sh` | `giftlist-buildingblocks/{Directory.Build.props,nuget.config}` | the other four .NET repo roots | `RepoRootFileSyncTests` |
+| `scripts/sync-repo-roots.sh` | `giftlist-buildingblocks/{Directory.Build.props,nuget.config,Directory.Build.targets}` | the other four .NET repo roots | `RepoRootFileSyncTests` |
 | `scripts/sync-arch-tests.sh` | `giftlist-giftlists/tests/GiftLists.UnitTests/Architecture` | the other four `*.UnitTests/Architecture` folders | `ArchitectureTestSyncTests` |
 
 Five repos, not seven: `giftlist-web` and this one contain no MSBuild project, so a
@@ -78,7 +88,8 @@ Then check:
 | `http://localhost:8080/healthz/ready` | `Healthy` |
 | `make ps` | every service `healthy` |
 
-See `make help` for the full target list (`up`, `down`, `reset`, `restart`, `build`, `logs`, `ps`).
+See `make help` for the full target list (`clone-all`, `pack-all`, `up`, `down`, `reset`,
+`restart`, `build`, `logs`, `ps`, `reset-testcontainers`).
 
 ## Adding a dependency to `web`
 
