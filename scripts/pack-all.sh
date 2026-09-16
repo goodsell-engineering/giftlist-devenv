@@ -7,8 +7,8 @@
 # WHY THE OVERWRITE GUARD IS NOT OPTIONAL. NuGet (and npm) cache by (id, version). Repacking an
 # unchanged version number over different content does not error -- it silently leaves every
 # consumer that has ever restored that version on the old, stale contract, forever, on that
-# machine. ARCHITECTURE.md "Packaging: local feed" and CONVENTIONS.md's contract-change procedure
-# both name this as the single most likely way to lose a day in this phase. The fix is always the
+# machine. ARCHITECTURE.md "Packaging: local feed" and the giftlist-contract-change skill both
+# name this as the single most likely way to lose a day in this phase. The fix is always the
 # same: bump <Version> (or package.json's "version") and re-run. THERE IS NO FLAG TO BYPASS THIS.
 # Deleting the file from local-feed to get around it defeats the entire point -- see this
 # project's giftlist-contract-change skill and just bump the version instead.
@@ -100,7 +100,7 @@ guard_against_overwrite() {
     fail "${description} already exists in the feed: ${path}
 NuGet/npm cache by (id, version); repacking the same version would silently leave every consumer
 that has already restored it on stale content. Bump the version and try again -- do not delete
-this file to get around the guard (CONVENTIONS.md's contract-change procedure, giftlist-contract-change skill)."
+this file to get around the guard (giftlist-contract-change skill, ARCHITECTURE.md \"What 'breaking' means for a message contract\")."
   fi
 }
 
@@ -153,7 +153,13 @@ pack_npm_client() {
   echo "Packing ${name} ${version} (${npm_client_dir})..."
   (
     cd "${client_dir}"
-    npm install --no-audit --no-fund
+    # `npm ci`, not `npm install`: matches how the rest of this workspace treats a lockfile as
+    # authoritative (giftlist-web's own CI installs the same way). `npm install` can float this
+    # project's ^-ranged buf/protobuf devDependencies onto a newer version than
+    # package-lock.json pins, silently changing what buf generates; `npm ci` installs exactly
+    # what the lockfile says and fails loudly instead if package.json and the lockfile have
+    # drifted apart.
+    npm ci --no-audit --no-fund
     # prepack runs `npm run build` (buf generate + tsc) for us, so this can never ship a stale
     # client -- see giftlist-gateway/clients/typescript/README.md.
     npm pack --pack-destination "${local_feed}"
