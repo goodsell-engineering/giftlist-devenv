@@ -24,55 +24,80 @@
 #   - nothing there yet                 -> move the scratch artifact into the feed. New version.
 #   - same content already there        -> discard the scratch artifact, log a skip, move on.
 #     This is what makes a second `make pack-all` a no-op instead of a crash.
-#   - DIFFERENT content already there   -> fail hard, exactly as before. The feed is left
+#   - a pre-GL-100 build-stamp mismatch -> re-verify and migrate. See "THE ONE-TIME MIGRATION"
+#     below -- this is not the common case and not a way around the guard.
+#   - DIFFERENT content, genuinely      -> fail hard, exactly as before. The feed is left
 #     untouched -- the scratch artifact is discarded, never moved over the existing file. This is
 #     the one case the guard exists for at all (a forgotten version bump), and GL-100 does not
 #     weaken it: it only stops the guard firing on packages nobody touched.
 #
 # WHAT "SAME CONTENT" MEANS, AND WHY IT'S TWO DIFFERENT CHECKS. A .nupkg and a .tgz are both
 # zip-family archives, and naive whole-file byte comparison ("just sha256sum the two files") was
-# tried against this workspace's own packages before picking the approach below -- see each
-# digest function for what was actually measured:
+# tried against this workspace's own packages before picking the approach below:
 #   - .tgz (npm pack): whole-file sha256 IS stable across runs of identical source -- verified by
 #     packing @giftlist/gateway-client twice in a row with nothing changed and diffing the
 #     tarballs byte-for-byte identical, matching npm's own printed `shasum`/`integrity` lines.
 #     npm normalises tar entry metadata for exactly this reason. So the .tgz check is plain
-#     whole-file byte identity; see tgz_content_digest.
-#   - .nupkg (dotnet pack): whole-file sha256 is NOT stable, for two independent reasons, both
-#     found by packing the SAME BuildingBlocks source twice and diffing the results rather than
-#     assumed:
+#     whole-file byte identity; see place_tgz_or_skip_or_fail.
+#   - .nupkg (dotnet pack): whole-file sha256 is NOT stable, for reasons found by repeatedly
+#     packing the SAME BuildingBlocks source and diffing the results rather than assumed:
 #       1. The NuGet/OPC packer regenerates two container-bookkeeping entries with a fresh random
 #          identifier on every single pack, unconditionally, regardless of content: the metadata
 #          part `package/services/metadata/core-properties/*.psmdcp` (the GUID-shaped filename
 #          itself changes every run, even though the file's own contents don't) and `_rels/.rels`
 #          (which both references that filename and carries its own randomly-generated
 #          relationship id for it). Neither carries information a consumer's build could ever
-#          observe. Excluded from the digest entirely; see nupkg_content_digest.
+#          observe. Excluded from the digest entirely -- see nupkg_tool.py's `load_normalized_entries`,
+#          written to a scratch file by write_nupkg_tool and invoked by nupkg_compare below.
 #       2. The .NET SDK's default SourceLink-style behaviour embeds `git rev-parse HEAD` for the
-#          WHOLE containing repo -- confirmed by packing literally the same BuildingBlocks source
-#          at two different commits of giftlist-buildingblocks and diffing the results -- into
-#          both the .nuspec (`<repository commit="...">`) and the compiled assembly's
-#          AssemblyInformationalVersion (as a "+<40 hex chars>" suffix baked into the .dll). That
-#          suffix does not just make the .nuspec text differ: because it is embedded via a
-#          generated AssemblyInfo.cs, it becomes a compiler INPUT, so it also changes the
-#          resulting IL's module version id (MVID) -- a stray textual substitution over the raw
-#          bytes cannot repair that. That commit describes "what commit was HEAD when this was
-#          built", not "what this package's own source is": a commit to a completely unrelated
-#          file anywhere else in the repo moves it just as much as a change to this package
-#          would. Comparing it would make a repeat `make pack-all` refuse every time the repo has
-#          advanced at all -- exactly the "unusable a second time" failure GL-100 exists to fix,
-#          just relocated one level down. Fixed at the source instead of papered over at compare
-#          time: `dotnet pack` below is given `-p:EnableSourceControlManagerQueries=false`, which
-#          stops the SDK querying git at all, so the .dll and .nuspec it produces depend only on
-#          this package's own source -- verified by rebuilding BuildingBlocks from clean twice
-#          with the flag set and diffing every entry (nuspec, [Content_Types].xml, .dll) byte-
-#          identical, where without it only the .nuspec/.dll had differed.
-#     Once both of the above are accounted for -- entries 1 skipped, cause 2 prevented from
-#     happening at all -- every remaining entry in the .nupkg is byte-identical across repeated
-#     packs of the same source. So the check is: skip the two bookkeeping entries, hash everything
-#     else by name and content, sorted so entry order can't matter. See nupkg_content_digest. This
-#     asymmetry between the two artifact kinds is deliberate, not an oversight: dotnet pack and
-#     npm pack just don't offer the same reproducibility guarantee out of the box.
+#          WHOLE containing repo into both the .nuspec (`<repository commit="...">`) and the
+#          compiled assembly's AssemblyInformationalVersion (a "+<40 hex chars>" suffix). That
+#          commit describes "what commit was HEAD when this was built", not "what this package's
+#          own source is": a commit to a completely unrelated file anywhere else in the repo
+#          moves it just as much as a change to this package would. `dotnet pack` below is given
+#          `-p:EnableSourceControlManagerQueries=false`, which stops the SDK querying git at all,
+#          so a fresh pack's .nuspec and .dll depend only on this package's own source. Kept even
+#          though it introduces the one-time migration cost below, because the alternative --
+#          leaving it on -- reintroduces exactly the "a repeat run refuses" failure GL-100 exists
+#          to fix, just relocated one level down: EVERY subsequent commit to the repo, touching
+#          this package or not, would make an unrelated future `make pack-all` disagree with
+#          whatever got packed today.
+#       3. Independently of both of the above, and NOT fixable by any pack-time flag: a .NET
+#          assembly's Module Version ID (MVID, in the `#GUID` metadata heap), its PE COFF header
+#          timestamp, and its PDB CodeView debug-directory GUID+hash are regenerated on every
+#          single compile, by design -- deterministic only for a genuinely identical compiler
+#          invocation, not guaranteed to reproduce across separate pack *sessions* (a different
+#          SDK patch, a different machine, a different day). Verified, not assumed: forcing two
+#          `dotnet pack` runs of the exact same BuildingBlocks source at the exact same declared
+#          git commit still produced 72 differing bytes, every one of them inside these specific
+#          fields (confirmed by walking the actual PE/CLI structures, not guessed from offsets);
+#          every byte that is actual content -- IL, metadata tables, string/blob heaps -- matched.
+#          These fields are zeroed out before hashing; see nupkg_tool.py's `normalize_dll`.
+#     Once all three are accounted for, every remaining entry in the .nupkg is byte-identical
+#     across repeated packs of the same source, at the same declared commit. This asymmetry
+#     between the two artifact kinds is deliberate, not an oversight: dotnet pack and npm pack
+#     just don't offer the same reproducibility guarantee out of the box.
+#
+# THE ONE-TIME MIGRATION. Point 2 above has a consequence for a feed that already has packages in
+# it from before this fix landed: THEIR .nuspec/.dll still carry whatever commit was HEAD when
+# THEY were packed. A fresh pack of the exact same, still-unchanged source no longer embeds any
+# commit at all, so the two will not compare equal even after every normalisation above -- not
+# because content changed, but because the very definition of "content" (what gets embedded)
+# changed under this fix. Silently trusting that and overwriting would be exactly the kind of
+# guard-widening this script must never do, so it is not trusted -- it is RE-VERIFIED: when an
+# existing feed artifact's .nuspec still has a `<repository commit="...">` element, this script
+# rebuilds the SAME current source with that EXACT commit forced back in
+# (`-p:SourceRevisionId=<that commit>`) and compares THAT, not the fresh pack, against the feed.
+# Only if THAT comparison also says "same" does it conclude the underlying source is genuinely
+# unchanged and replace the feed's copy with the fresh (unstamped) pack, logging it as "migrated"
+# -- a third, distinct outcome from both "packed" and "skipped". If it says "different", this is
+# a real conflict and fails exactly like any other mismatch. This is not the "delete the file to
+# get around the guard" shortcut the giftlist-contract-change skill forbids: that shortcut trusts
+# an unreviewed claim that a mismatch doesn't matter; this recomputes the exact same
+# already-proven comparison against a like-for-like rebuild before ever accepting one, and only
+# ever fires for a feed artifact carrying the specific, checkable marker of predating this fix --
+# once a package has gone through it, the marker is gone and this path never triggers for it
+# again. See nupkg_compare / nupkg_legacy_commit and the legacy branch in pack_dotnet_package.
 #
 # DEPENDENCY ORDER, AND WHY IT BARELY MATTERS BUT IS KEPT ANYWAY. Every package below is
 # self-contained at pack time: BuildingBlocks.Infrastructure depends on BuildingBlocks via an
@@ -122,6 +147,14 @@ readonly required_repos=(
   giftlist-gateway
 )
 
+# Where nupkg_tool.py is materialised for this run -- see write_nupkg_tool. Removed on exit
+# whether this script succeeds, fails, or is interrupted.
+nupkg_tool=""
+cleanup() {
+  [[ -n "${nupkg_tool}" && -f "${nupkg_tool}" ]] && rm -f "${nupkg_tool}"
+}
+trap cleanup EXIT
+
 fail() {
   echo "" >&2
   echo "pack-all: $1" >&2
@@ -151,52 +184,186 @@ read_xml_element() {
   grep -oP "(?<=<${element}>)[^<]+" "${file}" | head -n1
 }
 
-# Content digest for a .nupkg -- see the header comment ("WHAT 'SAME CONTENT' MEANS") for what
-# this excludes and why: the two randomly-named OPC bookkeeping entries NuGet regenerates on
-# every pack regardless of content. (The other source of noise found during design -- the
-# embedded git commit -- is prevented at pack time instead, via -p:EnableSourceControlManagerQueries=false
-# on the `dotnet pack` call below, so there is nothing left to normalise here.) Implemented in
-# Python rather than unzip/sha256sum because unzip's extraction argument is a glob pattern, not a
-# literal name, and silently fails to match entries like "[Content_Types].xml" that contain glob
-# metacharacters. python3 is assumed present on the host alongside dotnet/npm/node -- see
+# Writes nupkg_tool.py to a scratch file once per run (rather than re-embedding it in a heredoc
+# on every one of the ~12 calls this script makes into it) and records the path in $nupkg_tool.
+# See the header comment ("WHAT 'SAME CONTENT' MEANS" and "THE ONE-TIME MIGRATION") for what it
+# does and why. python3 is assumed present on the host alongside dotnet/npm/node -- see
 # README.md "Packing prerequisites".
-nupkg_content_digest() {
-  python3 - "$1" <<'PY'
-import hashlib, re, sys, zipfile
+write_nupkg_tool() {
+  nupkg_tool="$(mktemp)"
+  cat > "${nupkg_tool}" <<'PY'
+import hashlib, re, sys, zipfile, struct
 
-path = sys.argv[1]
-digest = hashlib.sha256()
-with zipfile.ZipFile(path) as zf:
-    names = sorted(
-        name for name in zf.namelist()
-        if name != "_rels/.rels"
-        and not re.match(r"^package/services/metadata/core-properties/.*\.psmdcp$", name)
-    )
-    for name in names:
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(hashlib.sha256(zf.read(name)).digest())
-print(digest.hexdigest())
+OPC_RELS = "_rels/.rels"
+PSMDCP_RE = re.compile(r"^package/services/metadata/core-properties/.*\.psmdcp$")
+REPOSITORY_LINE_RE = re.compile(r'[ \t]*<repository\b[^>]*/>\r?\n?')
+REPOSITORY_COMMIT_RE = re.compile(rb'<repository\b[^>]*\bcommit="([0-9a-f]{40})"')
+
+def normalize_dll(data):
+    """
+    Zeroes the handful of fields a .NET PE/CLI assembly carries purely to identify THIS
+    specific build -- never content a consumer's own build could observe -- so that two
+    packs of identical source compare equal regardless of which machine, session or SDK
+    patch produced them. Verified necessary, not assumed: forcing two `dotnet pack` runs of
+    the exact same BuildingBlocks source (same commit, same declared version) still produced
+    72 differing bytes, all five of them inside these exact fields; every other byte -- the
+    IL, the metadata tables, the string/blob heaps that hold real content -- matched.
+    Located by walking the real PE/CLI structures (COFF header, optional header data
+    directories, section table, CLR header, metadata root, stream headers), not by
+    hardcoding offsets, so this holds even if a future package's layout shifts.
+    """
+    data = bytearray(data)
+    if data[0:2] != b"MZ" or len(data) < 0x40:
+        return bytes(data)  # not a PE; nothing to normalise
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if e_lfanew + 4 > len(data) or data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        return bytes(data)
+    coff_off = e_lfanew + 4
+    _machine, num_sections, _timestamp = struct.unpack_from("<HHI", data, coff_off)
+    # COFF header TimeDateStamp: deterministic builds replace this with a content-derived
+    # value, so it moves whenever anything else here does -- zero it rather than trust it.
+    struct.pack_into("<I", data, coff_off + 4, 0)
+    size_of_opt_header = struct.unpack_from("<H", data, coff_off + 16)[0]
+    opt_off = coff_off + 20
+    if size_of_opt_header == 0:
+        return bytes(data)
+    magic = struct.unpack_from("<H", data, opt_off)[0]
+    is_pe32plus = magic == 0x20B
+    # PE checksum: usually left 0 by `dotnet build`, zeroed defensively anyway.
+    struct.pack_into("<I", data, opt_off + 0x40, 0)
+    data_dir_off = opt_off + (112 if is_pe32plus else 96)
+    debug_rva, debug_size = struct.unpack_from("<II", data, data_dir_off + 6 * 8)
+    clr_rva, clr_size = struct.unpack_from("<II", data, data_dir_off + 14 * 8)
+
+    sec_off = opt_off + size_of_opt_header
+    sections = []
+    for i in range(num_sections):
+        _name, vsize, vaddr, rawsize, rawptr = struct.unpack_from("<8sIIII", data, sec_off + i * 40)
+        sections.append((vsize, vaddr, rawsize, rawptr))
+
+    def rva_to_off(rva):
+        if rva == 0:
+            return None
+        for vsize, vaddr, rawsize, rawptr in sections:
+            if vaddr <= rva < vaddr + max(vsize, rawsize):
+                return rawptr + (rva - vaddr)
+        return None
+
+    if debug_size:
+        debug_file_off = rva_to_off(debug_rva)
+        if debug_file_off is not None:
+            for i in range(debug_size // 28):
+                eoff = debug_file_off + i * 28
+                (_chars, _ts, _maj, _minr, _typ, sizeofdata, _addrofraw,
+                 ptrtorawdata) = struct.unpack_from("<IIHHIIII", data, eoff)
+                # Each IMAGE_DEBUG_DIRECTORY entry's own TimeDateStamp.
+                struct.pack_into("<I", data, eoff + 4, 0)
+                # The blob it points to: for a CodeView entry, "RSDS" + the PDB's GUID + age
+                # + path; for a Reproducible/checksum entry, a content hash of the PDB. Both
+                # are build-identity, generated fresh every pack, never developer content.
+                if sizeofdata and ptrtorawdata:
+                    for j in range(sizeofdata):
+                        data[ptrtorawdata + j] = 0
+
+    if clr_size:
+        clr_file_off = rva_to_off(clr_rva)
+        if clr_file_off is not None:
+            _cb, _majrt, _minrt, meta_rva, _meta_size = struct.unpack_from("<IHHII", data, clr_file_off)
+            meta_off = rva_to_off(meta_rva)
+            if meta_off is not None and data[meta_off:meta_off + 4] == b"BSJB":
+                _maj, _minr, _reserved, length = struct.unpack_from("<HHII", data, meta_off + 4)
+                p = meta_off + 16 + length
+                _flags, nstreams = struct.unpack_from("<HH", data, p)
+                p += 4
+                for _ in range(nstreams):
+                    stream_off, stream_size = struct.unpack_from("<II", data, p)
+                    p += 8
+                    name_start = p
+                    end = data.index(b"\0", name_start)
+                    name = bytes(data[name_start:end]).decode()
+                    padded = ((end - name_start + 1) + 3) // 4 * 4
+                    p = name_start + padded
+                    if name == "#GUID":
+                        # The Module Version ID (MVID) -- regenerated every compile by design,
+                        # deterministic only for a fixed compiler version and fixed inputs
+                        # (which the informational-version suffix used to be, see the legacy
+                        # path below), never something a consumer's build depends on.
+                        for j in range(stream_size):
+                            data[meta_off + stream_off + j] = 0
+    return bytes(data)
+
+def strip_repository_element(nuspec_bytes):
+    """Pre-GL-100 packs embed <repository type="git" commit="..."/>; packs built with
+    -p:EnableSourceControlManagerQueries=false never do. Strip the element either way so a
+    legacy artifact and a fresh one compare on everything else."""
+    text = nuspec_bytes.decode("utf-8")
+    text = REPOSITORY_LINE_RE.sub("", text)
+    return text.encode("utf-8")
+
+def load_normalized_entries(path):
+    entries = {}
+    with zipfile.ZipFile(path) as zf:
+        for name in sorted(zf.namelist()):
+            if name == OPC_RELS or PSMDCP_RE.match(name):
+                continue
+            data = zf.read(name)
+            if name.endswith(".nuspec"):
+                data = strip_repository_element(data)
+            elif name.endswith(".dll"):
+                data = normalize_dll(data)
+            entries[name] = data
+    return entries
+
+def digest_of(entries):
+    d = hashlib.sha256()
+    for name in sorted(entries):
+        d.update(name.encode("utf-8"))
+        d.update(b"\0")
+        d.update(hashlib.sha256(entries[name]).digest())
+    return d.hexdigest()
+
+def raw_nuspec_bytes(path):
+    with zipfile.ZipFile(path) as zf:
+        for name in zf.namelist():
+            if name.endswith(".nuspec"):
+                return zf.read(name)
+    return None
+
+def main():
+    mode = sys.argv[1]
+    if mode == "compare":
+        a, b = sys.argv[2], sys.argv[3]
+        same = digest_of(load_normalized_entries(a)) == digest_of(load_normalized_entries(b))
+        print("same" if same else "different")
+    elif mode == "legacy-commit":
+        raw = raw_nuspec_bytes(sys.argv[2])
+        match = REPOSITORY_COMMIT_RE.search(raw) if raw else None
+        print(match.group(1).decode("ascii") if match else "")
+    else:
+        print(f"nupkg_tool.py: unknown mode {mode!r}", file=sys.stderr)
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main()
 PY
 }
 
-# Content digest for a .tgz -- see the header comment for why this one is plain whole-file
-# byte identity (verified stable across repeated `npm pack` runs of identical source), unlike
-# the .nupkg case above.
-tgz_content_digest() {
-  sha256sum "$1" | cut -d' ' -f1
+# "same" or "different" -- see the header comment for what this normalises away and why.
+nupkg_compare() {
+  python3 "${nupkg_tool}" compare "$1" "$2"
 }
 
-# The feed-placement decision, shared by both package kinds. `scratch_artifact` is the
-# freshly-built file, not yet in the feed; `feed_path` is where it would live; `digest_fn` names
-# the digest function (nupkg_content_digest or tgz_content_digest) appropriate to its kind.
-#
-#   - feed_path does not exist yet:            move scratch_artifact into place. New version.
-#   - feed_path exists, digests match:         discard scratch_artifact, log a skip, return 0.
-#   - feed_path exists, digests differ:        discard scratch_artifact, fail hard. The feed is
-#     never overwritten by this function -- see the GL-100 paragraph in the header comment.
-place_or_skip_or_fail() {
-  local scratch_artifact="$1" feed_path="$2" description="$3" digest_fn="$4"
+# The git commit a feed artifact's .nuspec still has embedded, if it predates GL-100 -- empty
+# for anything packed by this version of the script. See "THE ONE-TIME MIGRATION" above.
+nupkg_legacy_commit() {
+  python3 "${nupkg_tool}" legacy-commit "$1"
+}
+
+# Feed placement for the npm .tgz -- the simple two-way case. See the header comment
+# ("WHAT 'SAME CONTENT' MEANS"): whole-file byte identity is reliable for npm pack output, so
+# there is no legacy-migration tier here, unlike pack_dotnet_package below.
+place_tgz_or_skip_or_fail() {
+  local scratch_artifact="$1" feed_path="$2" description="$3"
 
   if [[ ! -f "${feed_path}" ]]; then
     mv "${scratch_artifact}" "${feed_path}"
@@ -204,11 +371,7 @@ place_or_skip_or_fail() {
     return 0
   fi
 
-  local new_digest existing_digest
-  new_digest="$("${digest_fn}" "${scratch_artifact}")"
-  existing_digest="$("${digest_fn}" "${feed_path}")"
-
-  if [[ "${new_digest}" == "${existing_digest}" ]]; then
+  if [[ "$(sha256sum "${scratch_artifact}" | cut -d' ' -f1)" == "$(sha256sum "${feed_path}" | cut -d' ' -f1)" ]]; then
     rm -f "${scratch_artifact}"
     echo "  ${description}: unchanged, already in the feed -- skipping"
     return 0
@@ -235,6 +398,7 @@ pack_dotnet_package() {
   [[ -n "${version}" ]] || fail "could not read <Version> from ${csproj}"
 
   local filename="${package_id}.${version}.nupkg"
+  local feed_path="${local_feed}/${filename}"
   local scratch
   scratch="$(mktemp -d)"
 
@@ -247,8 +411,7 @@ pack_dotnet_package() {
   # the .nuspec and the compiled assembly -- see the header comment ("WHAT 'SAME CONTENT' MEANS",
   # point 2). Without it, the artifact this produces would depend on which commit the repo
   # happens to be at right now, not just on this package's own source.
-  # Packed into a scratch dir, not straight into the feed -- see place_or_skip_or_fail, which
-  # decides whether it belongs there.
+  # Packed into a scratch dir, not straight into the feed -- placement is decided below.
   dotnet pack "${csproj}" \
     --configuration Release \
     --output "${scratch}" \
@@ -260,8 +423,58 @@ pack_dotnet_package() {
 
   [[ -f "${scratch}/${filename}" ]] || fail "dotnet pack did not produce the expected artifact: ${scratch}/${filename}"
 
-  place_or_skip_or_fail "${scratch}/${filename}" "${local_feed}/${filename}" "${package_id} ${version}" nupkg_content_digest
+  if [[ ! -f "${feed_path}" ]]; then
+    mv "${scratch}/${filename}" "${feed_path}"
+    echo "  ${package_id} ${version}: packed"
+    rm -rf "${scratch}"
+    return 0
+  fi
+
+  local verdict
+  verdict="$(nupkg_compare "${scratch}/${filename}" "${feed_path}")"
+
+  if [[ "${verdict}" == "same" ]]; then
+    rm -rf "${scratch}"
+    echo "  ${package_id} ${version}: unchanged, already in the feed -- skipping"
+    return 0
+  fi
+
+  # Not identical -- before failing, check whether the feed's copy predates GL-100 (see the
+  # header comment, "THE ONE-TIME MIGRATION"). Re-verify by rebuilding THIS source with that
+  # exact commit forced back in, rather than trusting the marker's mere presence.
+  local legacy_commit
+  legacy_commit="$(nupkg_legacy_commit "${feed_path}")"
+
+  if [[ -n "${legacy_commit}" ]]; then
+    local legacy_scratch
+    legacy_scratch="$(mktemp -d)"
+    dotnet pack "${csproj}" \
+      --configuration Release \
+      --output "${legacy_scratch}" \
+      --verbosity minimal \
+      -nodeReuse:false \
+      -p:UseSharedCompilation=false \
+      -p:SourceRevisionId="${legacy_commit}" \
+      -m:1 >/dev/null
+
+    if [[ -f "${legacy_scratch}/${filename}" ]] \
+      && [[ "$(nupkg_compare "${legacy_scratch}/${filename}" "${feed_path}")" == "same" ]]; then
+      rm -rf "${legacy_scratch}"
+      mv -f "${scratch}/${filename}" "${feed_path}"
+      echo "  ${package_id} ${version}: migrated (pre-GL-100 build stamp only -- re-verified" \
+        "unchanged by re-embedding the feed's own recorded commit ${legacy_commit:0:12} and re-comparing)"
+      rm -rf "${scratch}"
+      return 0
+    fi
+    rm -rf "${legacy_scratch}"
+  fi
+
   rm -rf "${scratch}"
+  fail "${package_id} ${version} already exists in the feed with DIFFERENT content: ${feed_path}
+NuGet/npm cache by (id, version); repacking the same version with different content would
+silently leave every consumer that has already restored it on stale content. Bump the version
+and try again -- do not delete this file to get around the guard (giftlist-contract-change
+skill, ARCHITECTURE.md \"What 'breaking' means for a message contract\")."
 }
 
 pack_npm_client() {
@@ -295,24 +508,25 @@ pack_npm_client() {
     npm ci --no-audit --no-fund
     # prepack runs `npm run build` (buf generate + tsc) for us, so this can never ship a stale
     # client -- see giftlist-gateway/clients/typescript/README.md. Packed into a scratch dir, not
-    # straight into the feed -- see place_or_skip_or_fail, which decides whether it belongs there.
+    # straight into the feed -- see place_tgz_or_skip_or_fail, which decides whether it belongs
+    # there.
     npm pack --pack-destination "${scratch}"
   )
 
   [[ -f "${scratch}/${tarball_name}" ]] || fail "npm pack did not produce the expected artifact: ${scratch}/${tarball_name}"
 
-  place_or_skip_or_fail "${scratch}/${tarball_name}" "${local_feed}/${tarball_name}" "${name} ${version}" tgz_content_digest
+  place_tgz_or_skip_or_fail "${scratch}/${tarball_name}" "${local_feed}/${tarball_name}" "${name} ${version}"
   rm -rf "${scratch}"
 }
 
 main() {
   require_command dotnet
-  # python3: needed only to compare .nupkg content across runs (nupkg_content_digest) -- a
-  # .nupkg is a zip and whole-file byte comparison is not reliable for it, see the header
-  # comment.
+  # python3: needed only to compare .nupkg content across runs (nupkg_tool.py) -- a .nupkg is a
+  # zip and whole-file byte comparison is not reliable for it, see the header comment.
   require_command python3
   check_siblings_present
   mkdir -p "${local_feed}"
+  write_nupkg_tool
 
   local relative_csproj
   for relative_csproj in "${dotnet_packages[@]}"; do
