@@ -30,8 +30,9 @@ help:
 	@echo "                            local-feed/ — see scripts/clone-all.sh"
 	@echo "  make pack-all             pack the BuildingBlocks family, the *.Contracts packages"
 	@echo "                            and the Gateway's npm client into local-feed/, in"
-	@echo "                            dependency order — refuses to overwrite a version already"
-	@echo "                            there (see scripts/pack-all.sh)"
+	@echo "                            dependency order — safe to run again (skips anything"
+	@echo "                            unchanged), fails hard if a version's content changed"
+	@echo "                            without a version bump (see scripts/pack-all.sh)"
 	@echo "  make up                   build (if needed) and start the whole stack, detached"
 	@echo "  make down                 stop and remove containers; named volumes are kept"
 	@echo "  make reset                down, then drop the named volumes (rabbitmq-data,"
@@ -51,9 +52,10 @@ help:
 clone-all:
 	"$(ROOT_DIR)scripts/clone-all.sh"
 
-# Dependency-ordered; refuses to overwrite a version already in local-feed. See
-# scripts/pack-all.sh's header for why that guard has no bypass, and README.md "The sibling-clone
-# layout" for the layout it assumes.
+# Dependency-ordered; safe to run repeatedly (unchanged packages are skipped) but still refuses
+# to overwrite a version already in local-feed with DIFFERENT content. See scripts/pack-all.sh's
+# header for why that guard has no bypass, and README.md "The sibling-clone layout" for the
+# layout it assumes.
 pack-all:
 	"$(ROOT_DIR)scripts/pack-all.sh"
 

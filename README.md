@@ -8,8 +8,9 @@ what *is* useful to install for editor tooling).
 ```
 make clone-all           # clone the other six repos as siblings, plus an empty local-feed/
 make pack-all            # pack the BuildingBlocks family, the *.Contracts packages and the
-                         # Gateway's npm client into local-feed/ (dependency-ordered; refuses
-                         # to overwrite a version already there)
+                         # Gateway's npm client into local-feed/ (dependency-ordered; safe to
+                         # run again -- skips anything unchanged, fails only on a version
+                         # whose content genuinely changed)
 cp .env.example .env    # optional — see .env.example for why
 make up                 # build (if needed) and start the whole stack, detached
 ```
@@ -18,6 +19,30 @@ Run `make clone-all` and `make pack-all` from a fresh clone of *this* repo only 
 they are the thing that already exists and create everything else around them. Once
 `local-feed/` is populated, each individual repo's own `dotnet restore` / `npm install` (see its
 README) works from a cold cache, because that is what `make pack-all` exists to make true.
+
+## Packing prerequisites
+
+**`make up` needs neither of the below — only `make pack-all` does.** The line above ("no host
+.NET or Node is required to run the system") is about the four .NET services and the SPA, which
+build and run entirely inside their own containers with the feed bind-mounted in; it is not about
+packing that feed in the first place. Packing is a local, host-side developer action — GL-101
+records containerizing it as considered and rejected, on two grounds: the npm/buf generator
+chain is the hard half to containerize well, and ARCHITECTURE.md already names packing a local
+developer action rather than part of the running system. That was the project owner's call, made
+on those grounds, not a technical impossibility — so the host does need:
+
+| Tool | Version this workspace needs | Verified from |
+|---|---|---|
+| .NET SDK | `10.0.111`, `rollForward: latestFeature` | `global.json`, identical byte-for-byte in all five .NET repos (`giftlist-buildingblocks`, `giftlist-identity`, `giftlist-giftlists`, `giftlist-reservations`, `giftlist-gateway`) |
+| Node | `>=22` | `engines.node` in `giftlist-gateway/clients/typescript/package.json` -- the only Node project this script packs; `giftlist-web` isn't in `required_repos` and isn't packed at all |
+| npm | whatever ships with that Node | `pack-all.sh` runs `npm ci`/`npm pack` |
+| Python 3 | any current 3.x | `pack-all.sh` uses it to compare a freshly-packed `.nupkg` against what is already in the feed — see that script's header comment |
+
+`rollForward: latestFeature` means the pinned `10.0.111` is a floor, not an exact match: any
+installed SDK at or above `10.0.111` within the `10.0` major.minor line resolves. `10.0.112` (one
+patch newer) is what this was actually verified against, on this exact machine, and it resolves
+fine — so if `dotnet --version` prints something below `10.0.111`, or outside the `10.0` line
+entirely, expect trouble; at or above it, you're covered.
 
 ## The sibling-clone layout
 
@@ -47,8 +72,11 @@ moved the SPA's protobuf generator into `giftlist-gateway`, which publishes the 
 tarball. Nothing can restore until the feed exists and the containers can see it, which is why the
 Quickstart above runs `make clone-all` then `make pack-all` before `make up`, not after.
 `scripts/pack-all.sh` packs in dependency order (BuildingBlocks family, then the three
-`*.Contracts` packages, then the npm client) and refuses to overwrite a version already sitting in
-`local-feed/` — see that script's header for why there is no flag to bypass that.
+`*.Contracts` packages, then the npm client). It's safe to run more than once: a package whose
+freshly-built content matches what's already at that version in `local-feed/` is skipped, so a
+second `make pack-all` after nothing has changed is a no-op. It still refuses to overwrite a
+version whose content has genuinely changed — see that script's header for how it tells those two
+cases apart and why there is no flag to bypass the second one.
 
 GL-26 (each .NET repo's `nuget.config`) and GL-29 (the feed mounts in `docker-compose.yml`) landed
 earlier, together and at the same mount point: every service, .NET or `web`, mounts the feed at
