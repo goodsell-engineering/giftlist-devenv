@@ -8,8 +8,9 @@ what *is* useful to install for editor tooling).
 ```
 make clone-all           # clone the other six repos as siblings, plus an empty local-feed/
 make pack-all            # pack the BuildingBlocks family, the *.Contracts packages and the
-                         # Gateway's npm client into local-feed/ (dependency-ordered; refuses
-                         # to overwrite a version already there)
+                         # Gateway's npm client into local-feed/ (dependency-ordered; safe to
+                         # run again -- skips anything unchanged, fails only on a version
+                         # whose content genuinely changed)
 cp .env.example .env    # optional — see .env.example for why
 make up                 # build (if needed) and start the whole stack, detached
 ```
@@ -24,15 +25,16 @@ README) works from a cold cache, because that is what `make pack-all` exists to 
 **`make up` needs neither of the below — only `make pack-all` does.** The line above ("no host
 .NET or Node is required to run the system") is about the four .NET services and the SPA, which
 build and run entirely inside their own containers with the feed bind-mounted in; it is not about
-packing that feed in the first place. Packing is a local, host-side developer action (see
-GL-101/GL-4: containerizing it was considered and rejected — the feed has to exist and be visible
-to `docker build` *before* any container can start, which a containerized packer cannot itself
-resolve), so the host does need:
+packing that feed in the first place. Packing is a local, host-side developer action — GL-101
+records containerizing it as considered and rejected, on two grounds: the npm/buf generator
+chain is the hard half to containerize well, and ARCHITECTURE.md already names packing a local
+developer action rather than part of the running system. That was the project owner's call, made
+on those grounds, not a technical impossibility — so the host does need:
 
 | Tool | Version this workspace needs | Verified from |
 |---|---|---|
 | .NET SDK | `10.0.111`, `rollForward: latestFeature` | `global.json`, identical byte-for-byte in all five .NET repos (`giftlist-buildingblocks`, `giftlist-identity`, `giftlist-giftlists`, `giftlist-reservations`, `giftlist-gateway`) |
-| Node | `>=22` | `engines.node` in `giftlist-web/package.json` and `giftlist-gateway/clients/typescript/package.json` |
+| Node | `>=22` | `engines.node` in `giftlist-gateway/clients/typescript/package.json` -- the only Node project this script packs; `giftlist-web` isn't in `required_repos` and isn't packed at all |
 | npm | whatever ships with that Node | `pack-all.sh` runs `npm ci`/`npm pack` |
 | Python 3 | any current 3.x | `pack-all.sh` uses it to compare a freshly-packed `.nupkg` against what is already in the feed — see that script's header comment |
 

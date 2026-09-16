@@ -99,6 +99,26 @@
 # once a package has gone through it, the marker is gone and this path never triggers for it
 # again. See nupkg_compare / nupkg_legacy_commit and the legacy branch in pack_dotnet_package.
 #
+# RECOVERING FROM A GENUINE, NOT-YOUR-FAULT FAILURE. Normalisation above cannot absorb a PE
+# *layout* shift, only fixed-size build-identity fields: a CodeView blob's bytes are zeroed but
+# its own LENGTH is not, so a workspace at a different absolute path -- a different clone
+# location, a rename, even a path a couple of characters shorter -- embeds a differently-sized
+# PDB path string, which shifts every downstream offset (confirmed: running this script from a
+# workspace path two characters shorter than the one an artifact was packed from fails hard on
+# BuildingBlocks 0.1.0, reproducing GL-100's exact symptom). The same can happen from an SDK
+# patch bump. When it does, the migration path above has already consumed its one legitimate
+# use for that artifact, so the guard correctly refuses -- on a package nobody touched, with no
+# `--force` by design. The recovery: **clearing local-feed/ and re-running `make pack-all` is
+# safe and correct, not a workaround.** The feed is generated, uncommitted, and specific to this
+# one workspace; every consumer restored FROM it into its own NuGet/npm cache
+# (`~/.nuget/packages`, npm's own cache), which keeps its own copy regardless of what
+# local-feed/ still contains. This is NOT the same act as the "delete one artifact to dodge a
+# forgotten version bump" shortcut this file forbids elsewhere: that shortcut discards the one
+# signal that a specific package's content silently changed at an existing version, reviewed by
+# nobody. Clearing the whole feed discards nothing -- everything in it is about to be
+# regenerated, reproducibly, from the same source that already is the source of truth. That
+# distinction is the entire reason the guard is allowed to have this one exception.
+#
 # DEPENDENCY ORDER, AND WHY IT BARELY MATTERS BUT IS KEPT ANYWAY. Every package below is
 # self-contained at pack time: BuildingBlocks.Infrastructure depends on BuildingBlocks via an
 # ordinary in-repo ProjectReference (resolved from source, not from the feed), and all three
@@ -147,11 +167,18 @@ readonly required_repos=(
   giftlist-gateway
 )
 
-# Where nupkg_tool.py is materialised for this run -- see write_nupkg_tool. Removed on exit
-# whether this script succeeds, fails, or is interrupted.
+# All scratch state for this run (nupkg_tool.py, and every pack_dotnet_package/pack_npm_client
+# scratch dir) lives under one directory -- see main(). Two reasons, not one: (1) it puts every
+# `mv` into local-feed/ on the SAME filesystem as the feed itself, so placing a finished
+# artifact is an atomic rename rather than a cross-device copy; (2) a single EXIT trap below
+# removes the whole thing on every exit path -- success, `fail`'s `exit 1`, or an interrupt --
+# so an early failure (say, `dotnet pack` not producing the file its own output claimed to
+# create) can never leave an orphaned temp dir behind just because that code path predates the
+# happy path's own cleanup.
+scratch_root=""
 nupkg_tool=""
 cleanup() {
-  [[ -n "${nupkg_tool}" && -f "${nupkg_tool}" ]] && rm -f "${nupkg_tool}"
+  [[ -n "${scratch_root}" && -d "${scratch_root}" ]] && rm -rf "${scratch_root}"
 }
 trap cleanup EXIT
 
@@ -190,7 +217,7 @@ read_xml_element() {
 # does and why. python3 is assumed present on the host alongside dotnet/npm/node -- see
 # README.md "Packing prerequisites".
 write_nupkg_tool() {
-  nupkg_tool="$(mktemp)"
+  nupkg_tool="$(mktemp -p "${scratch_root}")"
   cat > "${nupkg_tool}" <<'PY'
 import hashlib, re, sys, zipfile, struct
 
@@ -198,6 +225,17 @@ OPC_RELS = "_rels/.rels"
 PSMDCP_RE = re.compile(r"^package/services/metadata/core-properties/.*\.psmdcp$")
 REPOSITORY_LINE_RE = re.compile(r'[ \t]*<repository\b[^>]*/>\r?\n?')
 REPOSITORY_COMMIT_RE = re.compile(rb'<repository\b[^>]*\bcommit="([0-9a-f]{40})"')
+
+# IMAGE_DEBUG_DIRECTORY entry types whose BLOB is pure build-identity, safe to zero: CodeView
+# (2, PDB GUID+age+path), Reproducible (16, a marker carrying no data of its own) and
+# PdbChecksum (19, a content hash of the PDB). Deliberately NOT every type: type 17, Embedded
+# Portable PDB, has its blob BE an actual copy of the PDB -- zeroing it would hide a real
+# content change. Confirmed, not assumed: built with -p:DebugType=embedded (unused today --
+# nothing in this workspace sets it) and a two-line source edit produced a 7,905-byte delta
+# this comparer called "same" before this fix. Any type not in this set, known or not, is left
+# untouched, so it still differs and the comparison still fails toward "different" -- the one
+# direction this guard is allowed to be wrong in.
+DEBUG_BLOB_TYPES_SAFE_TO_ZERO = {2, 16, 19}
 
 def normalize_dll(data):
     """
@@ -254,14 +292,14 @@ def normalize_dll(data):
         if debug_file_off is not None:
             for i in range(debug_size // 28):
                 eoff = debug_file_off + i * 28
-                (_chars, _ts, _maj, _minr, _typ, sizeofdata, _addrofraw,
+                (_chars, _ts, _maj, _minr, typ, sizeofdata, _addrofraw,
                  ptrtorawdata) = struct.unpack_from("<IIHHIIII", data, eoff)
-                # Each IMAGE_DEBUG_DIRECTORY entry's own TimeDateStamp.
+                # Each IMAGE_DEBUG_DIRECTORY entry's own TimeDateStamp -- always a build
+                # timestamp per the PE spec, regardless of entry type.
                 struct.pack_into("<I", data, eoff + 4, 0)
-                # The blob it points to: for a CodeView entry, "RSDS" + the PDB's GUID + age
-                # + path; for a Reproducible/checksum entry, a content hash of the PDB. Both
-                # are build-identity, generated fresh every pack, never developer content.
-                if sizeofdata and ptrtorawdata:
+                # The blob itself: only for the types known to be pure build-identity -- see
+                # DEBUG_BLOB_TYPES_SAFE_TO_ZERO above for which types and why.
+                if typ in DEBUG_BLOB_TYPES_SAFE_TO_ZERO and sizeofdata and ptrtorawdata:
                     for j in range(sizeofdata):
                         data[ptrtorawdata + j] = 0
 
@@ -400,7 +438,7 @@ pack_dotnet_package() {
   local filename="${package_id}.${version}.nupkg"
   local feed_path="${local_feed}/${filename}"
   local scratch
-  scratch="$(mktemp -d)"
+  scratch="$(mktemp -d -p "${scratch_root}")"
 
   echo "Packing ${package_id} ${version} (${relative_csproj})..."
   # -nodeReuse:false -p:UseSharedCompilation=false -m:1: several agents/services build
@@ -446,16 +484,20 @@ pack_dotnet_package() {
   legacy_commit="$(nupkg_legacy_commit "${feed_path}")"
 
   if [[ -n "${legacy_commit}" ]]; then
-    local legacy_scratch
-    legacy_scratch="$(mktemp -d)"
-    dotnet pack "${csproj}" \
+    local legacy_scratch legacy_pack_output
+    legacy_scratch="$(mktemp -d -p "${scratch_root}")"
+    if ! legacy_pack_output="$(dotnet pack "${csproj}" \
       --configuration Release \
       --output "${legacy_scratch}" \
       --verbosity minimal \
       -nodeReuse:false \
       -p:UseSharedCompilation=false \
       -p:SourceRevisionId="${legacy_commit}" \
-      -m:1 >/dev/null
+      -m:1 2>&1)"; then
+      fail "re-pack of ${package_id} ${version} at its feed-recorded commit ${legacy_commit:0:12} failed
+(while re-verifying a pre-GL-100 artifact -- see \"THE ONE-TIME MIGRATION\"):
+${legacy_pack_output}"
+    fi
 
     if [[ -f "${legacy_scratch}/${filename}" ]] \
       && [[ "$(nupkg_compare "${legacy_scratch}/${filename}" "${feed_path}")" == "same" ]]; then
@@ -482,8 +524,6 @@ pack_npm_client() {
   local package_json="${client_dir}/package.json"
 
   [[ -f "${package_json}" ]] || fail "expected package.json not found: ${package_json}"
-  require_command npm
-  require_command node
 
   local name version tarball_name
   name="$(node -p "require('${package_json}').name")"
@@ -494,7 +534,7 @@ pack_npm_client() {
   tarball_name="$(echo "${name}" | sed -E 's#^@##; s#/#-#')-${version}.tgz"
 
   local scratch
-  scratch="$(mktemp -d)"
+  scratch="$(mktemp -d -p "${scratch_root}")"
 
   echo "Packing ${name} ${version} (${npm_client_dir})..."
   (
@@ -524,8 +564,16 @@ main() {
   # python3: needed only to compare .nupkg content across runs (nupkg_tool.py) -- a .nupkg is a
   # zip and whole-file byte comparison is not reliable for it, see the header comment.
   require_command python3
+  # npm/node: checked here, not inside pack_npm_client, so a host missing either fails in under
+  # a second -- before any of the six .NET packs run, not after ~70s of work already written to
+  # the feed (GL-101: this is squarely what "make pack-all needs Node too" means in practice).
+  require_command npm
+  require_command node
   check_siblings_present
   mkdir -p "${local_feed}"
+  # All scratch state for this run lives under one directory -- see the comment on
+  # `scratch_root`/`cleanup` above.
+  scratch_root="$(mktemp -d -p "${workspace}")"
   write_nupkg_tool
 
   local relative_csproj
