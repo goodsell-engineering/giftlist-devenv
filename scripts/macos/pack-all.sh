@@ -135,12 +135,18 @@
 # service's own `dotnet restore` / `npm install` is a separate step (see each repo's README).
 #
 # Usage:
-#   scripts/pack-all.sh
+#   scripts/macos/pack-all.sh
+
+# MACOS FORK of scripts/linux/pack-all.sh. Keep the two in step: a behaviour change made to one
+# belongs in the other. Differences, all for BSD userland and the stock /bin/bash 3.2:
+#   - grep -oP (PCRE lookbehind) -> sed -n 's#...#\1#p'   BSD grep has no -P.
+#   - mktemp [-d] -p DIR           -> mktemp [-d] DIR/tmp.XXXXXX   BSD mktemp has no -p.
+#   - sha256sum                    -> shasum -a 256   (ships with every macOS; sha256sum only on recent ones).
 
 set -euo pipefail
 
 # The directory holding all seven sibling clones: the parent of giftlist-devenv.
-readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly local_feed="${workspace}/local-feed"
 
 # Dependency-ordered list of packable .csproj files -- see the header comment for why this order
@@ -197,7 +203,7 @@ check_siblings_present() {
   for repo in "${required_repos[@]}"; do
     if [[ ! -d "${workspace}/${repo}" ]]; then
       fail "sibling clone missing: ${workspace}/${repo}
-Run scripts/clone-all.sh first (see README.md \"The sibling-clone layout\")."
+Run scripts/macos/clone-all.sh first (see README.md \"The sibling-clone layout\")."
     fi
   done
 }
@@ -208,7 +214,7 @@ Run scripts/clone-all.sh first (see README.md \"The sibling-clone layout\")."
 # matters when several agents are packing concurrently on a memory-constrained box.
 read_xml_element() {
   local element="$1" file="$2"
-  grep -oP "(?<=<${element}>)[^<]+" "${file}" | head -n1
+  sed -n "s#.*<${element}>\([^<][^<]*\).*#\1#p" "${file}" | head -n1
 }
 
 # Writes nupkg_tool.py to a scratch file once per run (rather than re-embedding it in a heredoc
@@ -217,7 +223,7 @@ read_xml_element() {
 # does and why. python3 is assumed present on the host alongside dotnet/npm/node -- see
 # README.md "Packing prerequisites".
 write_nupkg_tool() {
-  nupkg_tool="$(mktemp -p "${scratch_root}")"
+  nupkg_tool="$(mktemp "${scratch_root}/tmp.XXXXXX")"
   cat > "${nupkg_tool}" <<'PY'
 import hashlib, re, sys, zipfile, struct
 
@@ -409,7 +415,7 @@ place_tgz_or_skip_or_fail() {
     return 0
   fi
 
-  if [[ "$(sha256sum "${scratch_artifact}" | cut -d' ' -f1)" == "$(sha256sum "${feed_path}" | cut -d' ' -f1)" ]]; then
+  if [[ "$(shasum -a 256 "${scratch_artifact}" | cut -d' ' -f1)" == "$(shasum -a 256 "${feed_path}" | cut -d' ' -f1)" ]]; then
     rm -f "${scratch_artifact}"
     echo "  ${description}: unchanged, already in the feed -- skipping"
     return 0
@@ -438,7 +444,7 @@ pack_dotnet_package() {
   local filename="${package_id}.${version}.nupkg"
   local feed_path="${local_feed}/${filename}"
   local scratch
-  scratch="$(mktemp -d -p "${scratch_root}")"
+  scratch="$(mktemp -d "${scratch_root}/tmp.XXXXXX")"
 
   echo "Packing ${package_id} ${version} (${relative_csproj})..."
   # -nodeReuse:false -p:UseSharedCompilation=false -m:1: several agents/services build
@@ -485,7 +491,7 @@ pack_dotnet_package() {
 
   if [[ -n "${legacy_commit}" ]]; then
     local legacy_scratch legacy_pack_output
-    legacy_scratch="$(mktemp -d -p "${scratch_root}")"
+    legacy_scratch="$(mktemp -d "${scratch_root}/tmp.XXXXXX")"
     if ! legacy_pack_output="$(dotnet pack "${csproj}" \
       --configuration Release \
       --output "${legacy_scratch}" \
@@ -534,7 +540,7 @@ pack_npm_client() {
   tarball_name="$(echo "${name}" | sed -E 's#^@##; s#/#-#')-${version}.tgz"
 
   local scratch
-  scratch="$(mktemp -d -p "${scratch_root}")"
+  scratch="$(mktemp -d "${scratch_root}/tmp.XXXXXX")"
 
   echo "Packing ${name} ${version} (${npm_client_dir})..."
   (
@@ -573,7 +579,7 @@ main() {
   mkdir -p "${local_feed}"
   # All scratch state for this run lives under one directory -- see the comment on
   # `scratch_root`/`cleanup` above.
-  scratch_root="$(mktemp -d -p "${workspace}")"
+  scratch_root="$(mktemp -d "${workspace}/tmp.XXXXXX")"
   write_nupkg_tool
 
   local relative_csproj

@@ -32,9 +32,14 @@
 # repo or the feed directory itself exists on disk -- that is what the stack's own `make up`
 # proves, at a cost (Testcontainers-adjacent load, a running daemon) this check exists to avoid
 # paying just to answer a much narrower question.
+# MACOS FORK of scripts/linux/check-feed-wiring.sh. Keep the two in step: a behaviour change made to one
+# belongs in the other. Differences, all for BSD userland and the stock /bin/bash 3.2:
+#   - none: nothing here is GNU-specific (needs docker + jq, e.g. `brew install jq`). Kept as a
+#     copy so scripts/macos/ is complete and the Makefile can pick one directory per OS.
+
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 EXPECTED_SERVICES=(identity giftlists reservations gateway web)

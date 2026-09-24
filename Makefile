@@ -19,6 +19,12 @@ SHELL := /usr/bin/env bash
 THIS_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(THIS_MAKEFILE))
 
+# Host OS picks the script set: scripts/macos/ (BSD userland, stock bash 3.2) or scripts/linux/
+# (GNU). Same behaviour either way -- see the "MACOS FORK" note at the top of each macOS script
+# for what differs and why. Override with e.g. `make pack-all SCRIPTS_OS=linux`.
+SCRIPTS_OS ?= $(if $(filter Darwin,$(shell uname -s)),macos,linux)
+SCRIPTS_DIR := $(ROOT_DIR)scripts/$(SCRIPTS_OS)
+
 COMPOSE := docker compose -f "$(ROOT_DIR)docker-compose.yml" --project-directory "$(ROOT_DIR)"
 
 .PHONY: help up down reset restart build logs ps reset-testcontainers pack-all clone-all
@@ -27,12 +33,12 @@ help:
 	@echo "GiftList devenv"
 	@echo ""
 	@echo "  make clone-all            clone the other six repos as siblings, plus an empty"
-	@echo "                            local-feed/ — see scripts/clone-all.sh"
+	@echo "                            local-feed/ — see scripts/<os>/clone-all.sh"
 	@echo "  make pack-all             pack the BuildingBlocks family, the *.Contracts packages"
 	@echo "                            and the Gateway's npm client into local-feed/, in"
 	@echo "                            dependency order — safe to run again (skips anything"
 	@echo "                            unchanged), fails hard if a version's content changed"
-	@echo "                            without a version bump (see scripts/pack-all.sh)"
+	@echo "                            without a version bump (see scripts/<os>/pack-all.sh)"
 	@echo "  make up                   build (if needed) and start the whole stack, detached"
 	@echo "  make down                 stop and remove containers; named volumes are kept"
 	@echo "  make reset                down, then drop the named volumes (rabbitmq-data,"
@@ -50,14 +56,14 @@ help:
 	@echo "            — see .env.example for why), then make up"
 
 clone-all:
-	"$(ROOT_DIR)scripts/clone-all.sh"
+	"$(SCRIPTS_DIR)/clone-all.sh"
 
 # Dependency-ordered; safe to run repeatedly (unchanged packages are skipped) but still refuses
-# to overwrite a version already in local-feed with DIFFERENT content. See scripts/pack-all.sh's
+# to overwrite a version already in local-feed with DIFFERENT content. See scripts/<os>/pack-all.sh's
 # header for why that guard has no bypass, and README.md "The sibling-clone layout" for the
 # layout it assumes.
 pack-all:
-	"$(ROOT_DIR)scripts/pack-all.sh"
+	"$(SCRIPTS_DIR)/pack-all.sh"
 
 up:
 	$(COMPOSE) up --build -d

@@ -36,7 +36,7 @@
 # rather than a skip — a silent skip is how one repo's copy drifts.
 #
 # Usage:
-#   scripts/sync-arch-tests.sh
+#   scripts/linux/sync-arch-tests.sh
 #
 # Edit the canonical copy in giftlist-giftlists, then run this script, then commit everything it
 # touched IN EACH REPO IT TOUCHED — five commits and five pull requests, which is the multi-repo
@@ -47,7 +47,7 @@
 set -euo pipefail
 
 # The directory holding all seven sibling clones: the parent of giftlist-devenv.
-readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly canonical_dir="${workspace}/giftlist-giftlists/tests/GiftLists.UnitTests/Architecture"
 readonly target_dirs=(
   "${workspace}/giftlist-buildingblocks/tests/BuildingBlocks.UnitTests/Architecture"
