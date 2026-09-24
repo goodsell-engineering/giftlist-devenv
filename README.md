@@ -20,6 +20,16 @@ they are the thing that already exists and create everything else around them. O
 `local-feed/` is populated, each individual repo's own `dotnet restore` / `npm install` (see its
 README) works from a cold cache, because that is what `make pack-all` exists to make true.
 
+## Scripts: `scripts/linux/` and `scripts/macos/`
+
+Every script exists twice, once per host OS. `make` picks the set from `uname -s` (override with
+`SCRIPTS_OS=linux` or `SCRIPTS_OS=macos`); run them directly from whichever directory matches your
+machine. The macOS copies differ only where BSD userland and the stock `/bin/bash` 3.2 force it
+(`shasum -a 256` for `sha256sum`, `mktemp DIR/tmp.XXXXXX` for `mktemp -p DIR`, `sed` for
+`grep -oP`); each one's "MACOS FORK" header lists exactly what changed. **Change one, change
+both.** CI runs on Ubuntu, so it uses `scripts/linux/`. Paths below written `scripts/<os>/` mean
+whichever directory matches your machine.
+
 ## Packing prerequisites
 
 **`make up` needs neither of the below — only `make pack-all` does.** The line above ("no host
@@ -61,7 +71,7 @@ giftlist/
   giftlist-web/
 ```
 
-`make clone-all` (`scripts/clone-all.sh`) creates that layout in one command (the other six
+`make clone-all` (`scripts/<os>/clone-all.sh`) creates that layout in one command (the other six
 repos, HTTPS, plus an empty `local-feed/`); it skips anything already present rather than
 re-cloning or updating it, so an interrupted first run is safe to just re-run.
 
@@ -71,7 +81,7 @@ The split (GL-25) converted every cross-repo `ProjectReference` into a `PackageR
 moved the SPA's protobuf generator into `giftlist-gateway`, which publishes the client as an npm
 tarball. Nothing can restore until the feed exists and the containers can see it, which is why the
 Quickstart above runs `make clone-all` then `make pack-all` before `make up`, not after.
-`scripts/pack-all.sh` packs in dependency order (BuildingBlocks family, then the three
+`scripts/<os>/pack-all.sh` packs in dependency order (BuildingBlocks family, then the three
 `*.Contracts` packages, then the npm client). It's safe to run more than once: a package whose
 freshly-built content matches what's already at that version in `local-feed/` is skipped, so a
 second `make pack-all` after nothing has changed is a no-op. It still refuses to overwrite a
@@ -97,8 +107,8 @@ copy fails the build instead of rotting quietly.
 
 | Script | Canonical copy | Propagates | Checked by |
 |---|---|---|---|
-| `scripts/sync-repo-roots.sh` | `giftlist-buildingblocks/{Directory.Build.props,nuget.config,Directory.Build.targets}` | the other four .NET repo roots | `RepoRootFileSyncTests` |
-| `scripts/sync-arch-tests.sh` | `giftlist-giftlists/tests/GiftLists.UnitTests/Architecture` | the other four `*.UnitTests/Architecture` folders | `ArchitectureTestSyncTests` |
+| `scripts/<os>/sync-repo-roots.sh` | `giftlist-buildingblocks/{Directory.Build.props,nuget.config,Directory.Build.targets}` | the other four .NET repo roots | `RepoRootFileSyncTests` |
+| `scripts/<os>/sync-arch-tests.sh` | `giftlist-giftlists/tests/GiftLists.UnitTests/Architecture` | the other four `*.UnitTests/Architecture` folders | `ArchitectureTestSyncTests` |
 
 Five repos, not seven: `giftlist-web` and this one contain no MSBuild project, so a
 `Directory.Build.props` in either would be a file nothing reads.
@@ -181,7 +191,7 @@ own subfolder, so a single shared `obj` never happens either. `make reset` drops
 property, so a `Directory.Build.props` assignment outranks it — which would quietly put all four
 containers back on one path inside the bind mount, reinstating the race while the compose
 comments still claimed isolation. That file is also copied into all five .NET repo roots by
-`scripts/sync-repo-roots.sh` and pinned byte-for-byte by two architecture tests, so it is not the
+`scripts/<os>/sync-repo-roots.sh` and pinned byte-for-byte by two architecture tests, so it is not the
 place for this note — the next run of that script would revert it. If you want
 artifacts output on the host as well, pass it as a **global** property (`-p:ArtifactsPath=...`).
 

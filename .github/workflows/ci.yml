@@ -8,7 +8,7 @@ on:
 # GL-30: this repo has no MSBuild project and no package.json (README.md "Keeping shared files
 # identical across repos"), so "build and test" here means the one thing that IS testable without
 # the stack running: that docker-compose.yml's local-feed wiring hasn't drifted. See
-# scripts/check-feed-wiring.sh for what it asserts and why `docker compose config` is cheap
+# scripts/linux/check-feed-wiring.sh for what it asserts and why `docker compose config` is cheap
 # enough to run on every push.
 jobs:
   feed-wiring:
@@ -17,4 +17,4 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check local-feed mount wiring
-        run: ./scripts/check-feed-wiring.sh
+        run: ./scripts/linux/check-feed-wiring.sh

@@ -24,9 +24,14 @@
 # first run safe to just re-run.
 #
 # Usage:
-#   scripts/clone-all.sh
+#   scripts/macos/clone-all.sh
 #
 # Then: make pack-all (fills local-feed/), then make up.
+
+# MACOS FORK of scripts/linux/clone-all.sh. Keep the two in step: a behaviour change made to one
+# belongs in the other. Differences, all for BSD userland and the stock /bin/bash 3.2:
+#   - none: nothing here is GNU-specific. Kept as a copy so scripts/macos/ is complete and the
+#     Makefile can pick one directory per OS.
 
 set -euo pipefail
 
@@ -34,7 +39,7 @@ readonly org_url="https://github.com/goodsell-engineering"
 
 # The directory this repo's parent lives in -- i.e. where the other six repos and local-feed
 # belong as siblings of giftlist-devenv.
-readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 readonly repos=(
   giftlist-buildingblocks

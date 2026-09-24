@@ -67,7 +67,7 @@ x-dotnet-env: &dotnet-env
   # all four containers back on one path inside the bind mount while these comments still claim
   # isolation. Nothing sets it today. The warning deliberately lives HERE and in devenv/README.md
   # rather than in Directory.Build.props itself: since GL-25 that file is copied into all five
-  # .NET repo roots by giftlist-devenv/scripts/sync-repo-roots.sh and pinned byte-for-byte by
+  # .NET repo roots by giftlist-devenv/scripts/<os>/sync-repo-roots.sh and pinned byte-for-byte by
   # both TargetFrameworkTests and RepoRootFileSyncTests, so a comment there is per-repo drift the
   # next run of that script would revert. If you need artifacts output on the host too, pass it
   # as a global property (-p:ArtifactsPath=...), which outranks Directory.Build.props.

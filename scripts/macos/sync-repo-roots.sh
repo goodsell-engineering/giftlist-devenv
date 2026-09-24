@@ -32,16 +32,20 @@
 # it is added -- it does not exist anywhere in the project yet, so it is deliberately not listed.
 #
 # Usage:
-#   scripts/sync-repo-roots.sh
+#   scripts/macos/sync-repo-roots.sh
 #
 # Edit the canonical copy in giftlist-buildingblocks, run this, then commit everything it touched
 # in each repo it touched. Do not hand-edit any other repo's copy: RepoRootFileSyncTests will
 # just flag the drift on the next test run.
 
+# MACOS FORK of scripts/linux/sync-repo-roots.sh. Keep the two in step: a behaviour change made to one
+# belongs in the other. Differences, all for BSD userland and the stock /bin/bash 3.2:
+#   - sha256sum -> shasum -a 256   (ships with every macOS; sha256sum only on recent ones).
+
 set -euo pipefail
 
 # The directory holding all seven sibling clones: the parent of giftlist-devenv.
-readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly canonical_repo="${workspace}/giftlist-buildingblocks"
 readonly target_repos=(
   "${workspace}/giftlist-gateway"
@@ -67,7 +71,7 @@ readonly synced_files=(
 readonly manifest_name="repo-root-files.sha256"
 
 sha256_of() {
-  sha256sum "$1" | cut -d' ' -f1
+  shasum -a 256 "$1" | cut -d' ' -f1
 }
 
 # Regenerates {repo}/repo-root-files.sha256 by hashing the *canonical* copy of every synced file
