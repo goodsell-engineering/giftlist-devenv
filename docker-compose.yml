@@ -249,6 +249,9 @@ services:
       # default configuration order, so this keeps CORS matching reality whenever VITE_PORT is
       # overridden instead of breaking silently.
       Cors__AllowedOrigins__0: http://localhost:${VITE_PORT:-5173}
+      # PUBLIC_HOST (see .env.example): the address a browser on ANOTHER machine uses to reach this
+      # stack. Its Origin header is http://<host>:<VITE_PORT>, which index 0 above doesn't match.
+      Cors__AllowedOrigins__1: http://${PUBLIC_HOST:-localhost}:${VITE_PORT:-5173}
       # GL-23: validates the JWT the SPA sends with myGiftLists/giftList(id) — the public half of
       # Identity's own Jwt__SigningKeyPem above (ARCHITECTURE.md "Why workers still need a little HTTP"). Gateway refuses to start
       # without these three, same fail-fast as Identity's own signing key. JWT_PUBLIC_KEY_PEM's
@@ -279,7 +282,9 @@ services:
       dockerfile: Dockerfile
     container_name: giftlist-web
     environment:
-      VITE_GATEWAY_URL: http://localhost:${GATEWAY_PORT:-8080}
+      # The browser, not this container, calls the gateway, so this must be an address the
+      # browser can reach: localhost for same-machine use, PUBLIC_HOST for LAN access.
+      VITE_GATEWAY_URL: http://${PUBLIC_HOST:-localhost}:${GATEWAY_PORT:-8080}
     ports:
       - "${VITE_PORT:-5173}:5173"
     volumes:
