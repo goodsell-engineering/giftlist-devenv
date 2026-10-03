@@ -20,6 +20,12 @@ they are the thing that already exists and create everything else around them. O
 `local-feed/` is populated, each individual repo's own `dotnet restore` / `npm install` (see its
 README) works from a cold cache, because that is what `make pack-all` exists to make true.
 
+## Acceptance tests in a real browser: `e2e/`
+
+A Playwright harness that drives the SPA against the running stack, using the installed Google
+Chrome. `make e2e-install` once, then `make e2e`, or `make e2e SPECS=… EVIDENCE=…` to run an SDLC
+test run's specs. See `e2e/README.md`. Unlike `make up`, this needs Node on the host.
+
 ## Scripts: `scripts/linux/` and `scripts/macos/`
 
 Every script exists twice, once per host OS. `make` picks the set from `uname -s` (override with

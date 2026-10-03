@@ -1,0 +1,16 @@
+{
+  "name": "giftlist-e2e",
+  "private": true,
+  "description": "Playwright harness for GiftList acceptance tests against the running compose stack",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.4"
+  }
+}
