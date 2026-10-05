@@ -27,7 +27,7 @@ SCRIPTS_DIR := $(ROOT_DIR)scripts/$(SCRIPTS_OS)
 
 COMPOSE := docker compose -f "$(ROOT_DIR)docker-compose.yml" --project-directory "$(ROOT_DIR)"
 
-.PHONY: help up down reset restart build logs ps reset-testcontainers pack-all clone-all
+.PHONY: help up down reset restart build logs ps reset-testcontainers pack-all clone-all e2e-install e2e
 
 help:
 	@echo "GiftList devenv"
@@ -51,6 +51,11 @@ help:
 	@echo "  make reset-testcontainers reap every Testcontainers-managed container left behind"
 	@echo "                            by 'dotnet test' — see README.md \"Integration tests and"
 	@echo "                            container reuse\""
+	@echo "  make e2e-install          install the Playwright harness in e2e/ (uses the installed"
+	@echo "                            Google Chrome; downloads no browser)"
+	@echo "  make e2e                  run e2e/tests against the running stack; or"
+	@echo "                            SPECS=/abs/dir EVIDENCE=/abs/dir to run a test run's specs"
+	@echo "                            and save their screenshots — see e2e/README.md"
 	@echo ""
 	@echo "First time: make clone-all, then make pack-all, then cp .env.example .env (optional"
 	@echo "            — see .env.example for why), then make up"
@@ -109,3 +114,20 @@ reset-testcontainers:
 			--format '  {{.Names}}  {{.Image}}  {{.Status}}  {{.Label "giftlist.suite"}}'; \
 		docker rm -f $$ids; \
 	fi
+
+# Playwright acceptance harness (e2e/README.md). Specs from elsewhere — an SDLC test run's e2e/
+# folder — are copied into e2e/runs/ so they resolve the harness's own node_modules and fixtures;
+# the copy is gitignored and replaced on every run. SPECS and EVIDENCE must be absolute paths.
+E2E_DIR := $(ROOT_DIR)e2e
+
+e2e-install:
+	cd "$(E2E_DIR)" && npm ci --no-audit --no-fund
+
+e2e:
+	@if [ -n "$(SPECS)" ]; then \
+		rm -rf "$(E2E_DIR)/runs" && mkdir -p "$(E2E_DIR)/runs" && \
+		cp "$(SPECS)"/*.spec.ts "$(E2E_DIR)/runs/"; \
+	fi
+	cd "$(E2E_DIR)" && \
+		E2E_SPECS="$(if $(SPECS),$(E2E_DIR)/runs,)" E2E_EVIDENCE="$(EVIDENCE)" \
+		npx playwright test $(ARGS)

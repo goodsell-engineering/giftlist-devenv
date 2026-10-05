@@ -1,0 +1,6 @@
+node_modules/
+# Traces and failure screenshots: they can hold JWTs, so they never leave the harness.
+test-results/
+playwright-report/
+# Specs copied in from an SDLC run directory by run.sh.
+runs/
